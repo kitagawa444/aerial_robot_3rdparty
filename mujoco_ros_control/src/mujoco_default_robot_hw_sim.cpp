@@ -9,6 +9,13 @@ namespace mujoco_ros_control
                               mjData* mujoco_data
                               )
   {
+    // // init 内で rosparam を読む例
+    // model_nh.param("use_ros_control", use_ros_control_, true);
+    // model_nh.param("use_control_input", use_control_input_, false);
+    // model_nh.param("control_input_as_feedforward", control_input_as_feedforward_, false);
+    // model_nh.param("publish_joint_states_manually", publish_joint_states_manually_, false);
+    // model_nh.param("allow_direct_state_set", allow_direct_state_set_, true);
+
     mujoco_model_ = mujoco_model;
     mujoco_data_ = mujoco_data;
 
@@ -41,102 +48,193 @@ namespace mujoco_ros_control
     dierct_root_pose_sub_ = model_nh.subscribe("mujoco/direct_root_pose", 1, &DefaultRobotHWSim::rootPoseCallback, this);
     direct_root_pose_flag_ = false;
 
+
+    // 1DOF 
+    joint_names_.clear();
+    for (int j = 0; j < mujoco_model_->njnt; ++j)
+      {
+        if (mujoco_model_->jnt_type[j] > 1)
+          {
+            const char* jname = mj_id2name(mujoco_model_, mjOBJ_JOINT, j);
+            if (jname) joint_names_.push_back(std::string(jname));
+          }
+      }
+
+    const size_t nj = joint_names_.size();
+    pos_.assign(nj, 0.0);
+    vel_.assign(nj, 0.0);
+    eff_.assign(nj, 0.0);
+    cmd_eff_.assign(nj, 0.0);
+    act_id_by_joint_idx_.assign(nj, -1);
+
+    // 名前一致: joint 名と同名の actuator を探す
+    for (size_t i = 0; i < nj; ++i)
+      {
+        int act_id = mj_name2id(mujoco_model_, mjOBJ_ACTUATOR, joint_names_[i].c_str());
+        act_id_by_joint_idx_[i] = act_id; // 無ければ -1 のまま
+        if (act_id < 0)
+          {
+            ROS_WARN_STREAM("No actuator found for joint " << joint_names_[i]
+                            << ". This joint will be read-only.");
+          }
+      }
+
+    // JointStateInterface 登録
+    for (size_t i = 0; i < nj; ++i)
+      {
+        hardware_interface::JointStateHandle sh(joint_names_[i], &pos_[i], &vel_[i], &eff_[i]);
+        jnt_state_interface_.registerHandle(sh);
+      }
+    registerInterface(&jnt_state_interface_);
+
+    // EffortJointInterface 登録（書き込み先は cmd_eff_）
+    for (size_t i = 0; i < nj; ++i)
+      {
+        hardware_interface::JointHandle eh(jnt_state_interface_.getHandle(joint_names_[i]), &cmd_eff_[i]);
+        effort_jnt_interface_.registerHandle(eh);
+      }
+    registerInterface(&effort_jnt_interface_);
+    ROS_INFO_STREAM("Registered " << nj << " joints to EffortJointInterface.");
+
+
     return true;
   }
 
   void DefaultRobotHWSim::read(const ros::Time& time, const ros::Duration& period)
   {
-    if((time - last_joint_state_time_).toSec() >= joint_state_pub_rate_)
+    // 1) ros_control 用バッファへ反映
+    const mjtNum* qpos = mujoco_data_->qpos;
+    const mjtNum* qvel = mujoco_data_->qvel;
+    const mjtNum* qfrc_act = mujoco_data_->qfrc_actuator; // DOF ごとの一般化力
+
+    for (size_t i = 0; i < joint_names_.size(); ++i)
       {
-        sensor_msgs::JointState joint_state_msg;
-        joint_state_msg.header.stamp = time;
-        joint_state_msg.name = joint_list_;
+        int j = mj_name2id(mujoco_model_, mjOBJ_JOINT, joint_names_[i].c_str());
+        if (j < 0) continue;
 
-        mjtNum* qpos = mujoco_data_->qpos;
-        int* jnt_qposadr = mujoco_model_->jnt_qposadr;
-        mjtNum* qvel = mujoco_data_->qvel;
-        mjtNum* actuator_force = mujoco_data_->actuator_force;
-        int* jnt_dofadr = mujoco_model_->jnt_dofadr;
+        int qposadr = mujoco_model_->jnt_qposadr[j];
+        int dofadr  = mujoco_model_->jnt_dofadr[j];
 
-        for(int i = 0; i < mujoco_model_->njnt; i++)
+        pos_[i] = qpos[qposadr];
+        vel_[i] = qvel[dofadr];
+        eff_[i] = qfrc_act[dofadr];
+      }
+
+    // 2) 自前 joint_states を出す場合（joint_state_controller を使わない時のみ）
+    if (publish_joint_states_manually_)
+      {
+        if ((time - last_joint_state_time_).toSec() >= joint_state_pub_rate_)
           {
-            if(mujoco_model_->jnt_type[i] > 1)
-              {
-                joint_state_msg.position.push_back(qpos[jnt_qposadr[i]]);
-                joint_state_msg.velocity.push_back(qvel[jnt_dofadr[i]]);
-                 int j = joint_state_msg.position.size() - 1;
-                joint_state_msg.effort.push_back(actuator_force[actuator_id_list_.at(j)]);
-              }
+            sensor_msgs::JointState js;
+            js.header.stamp = time;
+            js.name = joint_names_;
+            js.position = pos_;
+            js.velocity = vel_;
+            js.effort   = eff_;
+            joint_state_pub_.publish(js);
+            last_joint_state_time_ = time;
           }
-
-        joint_state_pub_.publish(joint_state_msg);
-        last_joint_state_time_ = time;
       }
   }
 
-  void DefaultRobotHWSim::write(const ros::Time& time, const ros::Duration& period)
-  {
-    for(int i = 0; i < control_input_.size(); i++)
-      {
-        mujoco_data_->ctrl[i] = control_input_.at(i);
-      }
+  static inline double clip(double x, double lo, double hi)
+{
+  return std::max(lo, std::min(x, hi));
+}
 
-    // set the root pose directly if necessary
-    if (direct_root_pose_flag_) {
-      mjtNum* qpos = mujoco_data_->qpos;
-      // check the type of the first joint
-      switch (mujoco_model_->jnt_type[0]) {
-      case mjtJoint_::mjJNT_FREE:
+
+void DefaultRobotHWSim::write(const ros::Time& time, const ros::Duration& period)
+{
+  // 1) ctrl を決定
+  //    - use_ros_control_ が true の場合: cmd_eff_ を使用
+  //    - use_control_input_ が true の場合:
+  //        * control_input_as_feedforward_ なら cmd_eff_ に加算
+  //        * そうでなければ control_input_ を単独で使用（旧経路優先）
+  for (size_t i = 0; i < joint_names_.size(); ++i)
+    {
+      int act = act_id_by_joint_idx_[i];
+      if (act < 0) continue;
+
+      double u = 0.0;
+      if (use_ros_control_) u += cmd_eff_[i];
+      if (use_control_input_)
         {
-          qpos[0] = direct_root_pose_.position.x;
-          qpos[1] = direct_root_pose_.position.y;
-          qpos[2] = direct_root_pose_.position.z;
-          qpos[3] = direct_root_pose_.orientation.w;
-          qpos[4] = direct_root_pose_.orientation.x;
-          qpos[5] = direct_root_pose_.orientation.y;
-          qpos[6] = direct_root_pose_.orientation.z;
-          break;
+          if (control_input_as_feedforward_) u += (act < (int)control_input_.size() ? control_input_[act] : 0.0);
+          else                               u  = (act < (int)control_input_.size() ? control_input_[act] : 0.0);
         }
-      case mjtJoint_::mjJNT_BALL:
+
+      double lo = -std::numeric_limits<double>::infinity();
+      double hi =  std::numeric_limits<double>::infinity();
+      if (mujoco_model_->actuator_ctrllimited[act])
         {
-          qpos[0] = direct_root_pose_.orientation.w;
-          qpos[1] = direct_root_pose_.orientation.x;
-          qpos[2] = direct_root_pose_.orientation.y;
-          qpos[3] = direct_root_pose_.orientation.z;
-          break;
+          lo = mujoco_model_->actuator_ctrlrange[2*act+0];
+          hi = mujoco_model_->actuator_ctrlrange[2*act+1];
         }
-      default:
-        {
-          break;
-        }
-      }
-      direct_root_pose_flag_ = false;
+      mujoco_data_->ctrl[act] = clip(u, lo, hi);
     }
 
-    // set the joint position directly if necessary
-    const auto names = direct_joint_position_.name;
-    const auto target_positions = direct_joint_position_.position;
-    if (names.size() > 0)
-      {
-        for(int i = 0; i < names.size(); i++)
-          {
-            int id = mj_name2id(mujoco_model_, mjtObj_::mjOBJ_JOINT, names.at(i).c_str());
-            if(id == -1)
-              {
-                ROS_WARN_STREAM("mujoco: joint name " <<  names.at(i) << " does not exist");
-                continue;
-              }
+  // 2) 直接書き換え（テレポート）。頻繁にやると数値的に不安定になるので注意
+  if (allow_direct_state_set_)
+    {
+      bool teleported = false;
 
-            mjtNum* qpos = mujoco_data_->qpos;
-            int* jnt_qposadr = mujoco_model_->jnt_qposadr;
-            qpos[jnt_qposadr[id]] = target_positions.at(i);
-
-
+      // root pose
+      if (direct_root_pose_flag_)
+        {
+          mjtNum* qpos = mujoco_data_->qpos;
+          switch (mujoco_model_->jnt_type[0]) {
+          case mjJNT_FREE:
+            qpos[0] = direct_root_pose_.position.x;
+            qpos[1] = direct_root_pose_.position.y;
+            qpos[2] = direct_root_pose_.position.z;
+            qpos[3] = direct_root_pose_.orientation.w;
+            qpos[4] = direct_root_pose_.orientation.x;
+            qpos[5] = direct_root_pose_.orientation.y;
+            qpos[6] = direct_root_pose_.orientation.z;
+            teleported = true;
+            break;
+          case mjJNT_BALL:
+            qpos[0] = direct_root_pose_.orientation.w;
+            qpos[1] = direct_root_pose_.orientation.x;
+            qpos[2] = direct_root_pose_.orientation.y;
+            qpos[3] = direct_root_pose_.orientation.z;
+            teleported = true;
+            break;
+          default:
+            break;
           }
-        direct_joint_position_.name.resize(0);
-        direct_joint_position_.position.resize(0);
-      }
-  }
+          direct_root_pose_flag_ = false;
+        }
+
+      // joint positions
+      if (!direct_joint_position_.name.empty())
+        {
+          auto& names = direct_joint_position_.name;
+          auto& target_positions = direct_joint_position_.position;
+
+          for (size_t k = 0; k < names.size(); ++k)
+            {
+              int jid = mj_name2id(mujoco_model_, mjOBJ_JOINT, names[k].c_str());
+              if (jid < 0) { ROS_WARN_STREAM("mujoco: joint name " << names[k] << " does not exist"); continue; }
+
+              int qposadr = mujoco_model_->jnt_qposadr[jid];
+              mujoco_data_->qpos[qposadr] = target_positions[k];
+              teleported = true;
+            }
+          direct_joint_position_.name.clear();
+          direct_joint_position_.position.clear();
+        }
+
+      // 状態を直接いじった場合、整合性を取る
+      if (teleported)
+        {
+          // 速度をゼロにするなどの安定化（任意）
+          // std::fill(mujoco_data_->qvel, mujoco_data_->qvel + mujoco_model_->nv, 0.0);
+          // 完全再計算（mj_step1/mj_step2 の間だが、forward で一旦一貫性を確保）
+          mj_forward(mujoco_model_, mujoco_data_);
+        }
+    }
+}
 
   void DefaultRobotHWSim::controlInputCallback(const sensor_msgs::JointState & msg)
   {

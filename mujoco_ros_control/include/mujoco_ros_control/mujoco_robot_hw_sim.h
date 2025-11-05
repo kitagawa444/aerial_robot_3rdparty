@@ -2,6 +2,10 @@
 
 #include <ros/ros.h>
 #include <hardware_interface/robot_hw.h>
+#include <hardware_interface/joint_state_interface.h>
+#include <hardware_interface/joint_command_interface.h>
+#include <hardware_interface/robot_hw.h>
+#include <angles/angles.h>
 
 #include <mujoco/mujoco.h>
 #include <mujoco/mjdata.h>

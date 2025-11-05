@@ -5,6 +5,8 @@
 #include <mujoco_ros_control/mujoco_robot_hw_sim.h>
 #include <geometry_msgs/Pose.h>
 #include <sensor_msgs/JointState.h>
+#include <geometry_msgs/Pose.h>
+
 
 namespace mujoco_ros_control
 {
@@ -33,6 +35,9 @@ namespace mujoco_ros_control
     mjModel* mujoco_model_;
     mjData* mujoco_data_;
 
+    hardware_interface::JointStateInterface  jnt_state_interface_;
+    hardware_interface::EffortJointInterface effort_jnt_interface_;
+
     std::vector<std::string> joint_list_;
     std::vector<int> actuator_id_list_;
     ros::Publisher joint_state_pub_;
@@ -47,6 +52,22 @@ namespace mujoco_ros_control
     sensor_msgs::JointState direct_joint_position_;
     geometry_msgs::Pose direct_root_pose_;
     bool direct_root_pose_flag_;
+
+        // 関節名・状態・コマンド格納
+    std::vector<std::string> joint_names_;
+    std::vector<double> pos_;
+    std::vector<double> vel_;
+    std::vector<double> eff_;
+    std::vector<double> cmd_eff_;
+
+    // 関節インデックス → アクチュエータ ID（ctrl 配列のインデックス）対応
+    std::vector<int> act_id_by_joint_idx_;
+
+    bool use_ros_control_{true};
+    bool use_control_input_{false};            // 旧経路の直接 ctrl 入力を許可
+    bool control_input_as_feedforward_{false}; // 上記を FF として加算
+    bool publish_joint_states_manually_{false};
+    bool allow_direct_state_set_{true};        // テレポート許可
 
   };
 }

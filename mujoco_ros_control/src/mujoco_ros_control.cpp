@@ -18,6 +18,7 @@ namespace mujoco_ros_control
     std::string xml_path;
     nhp_.getParam("mujoco_model_path", xml_path);
     nhp_.getParam("headless", headless_);
+
     if(!nhp_.getParam("mujoco_model_path", xml_path))
       {
         ROS_INFO("Could not get xml path from rosparam\n");
