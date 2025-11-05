@@ -24,6 +24,7 @@
 #include <functional>
 #include <string>
 #include <iostream>
+#include <iomanip>
 
 void MujocoVisualizationUtils::init(mjModel* mujoco_model, mjData* mujoco_data, GLFWwindow* window)
 {
@@ -72,30 +73,36 @@ void MujocoVisualizationUtils::init(mjModel* mujoco_model, mjData* mujoco_data, 
   profiler_init();
   sensor_init();
 
-  std::cout << "\n";
-  std::cout << "=========================================" << std::endl;
-  std::cout << "|       Key bind in MuJoCo viewer       |\n";
-  std::cout << "|    w    -> wire frame                 |\n";
-  std::cout << "|    r    -> show refrection            |\n";
-  std::cout << "|    t    -> transparent mode           |\n";
-  std::cout << "|    u    ->                            |\n";
-  std::cout << "|    i    -> inertia                    |\n";
-  std::cout << "|    a    ->                            |\n";
-  std::cout << "|    s    -> visualize shadow           |\n";
-  std::cout << "|    d    ->                            |\n";
-  std::cout << "|    f    -> visualize contact force    |\n";
-  std::cout << "|    g    ->                            |\n";
-  std::cout << "|    j    -> visualize joints           |\n";
-  std::cout << "| ; and : -> visualize coodinates       |\n";
-  std::cout << "|    x    ->                            |\n";
-  std::cout << "|    c    -> visualize contact point    |\n";
-  std::cout << "|    m    -> visualize center of mass   |\n";
-  std::cout << "|    ,    -> contour view               |\n";
-  std::cout << "| . and / -> visualize names of model   |\n";
-  std::cout << "=========================================" << std::endl;
-  std::cout << "\n";
-
+  // Print key bindings
+  print_key_bindings();
 }
+
+void MujocoVisualizationUtils::print_key_bindings()
+{
+  std::cout << "\n";
+  std::cout << "=========================================" << std::endl;
+  std::cout << "|       Key Bindings in MuJoCo Viewer   |" << std::endl;
+  std::cout << "=========================================" << std::endl;
+  std::cout << "|    w    -> Toggle wireframe mode      |" << std::endl;
+  std::cout << "|    r    -> Toggle reflection          |" << std::endl;
+  std::cout << "|    t    -> Toggle transparency        |" << std::endl;
+  std::cout << "|    f    -> Visualize contact forces   |" << std::endl;
+  std::cout << "|    c    -> Visualize contact points   |" << std::endl;
+  std::cout << "|    m    -> Visualize center of mass   |" << std::endl;
+  std::cout << "|    i    -> Visualize inertia          |" << std::endl;
+  std::cout << "|    j    -> Visualize joints           |" << std::endl;
+  std::cout << "|    x    -> Toggle axis visualization  |" << std::endl;
+  std::cout << "|    z    -> Reset camera view          |" << std::endl;
+  std::cout << "|    ESC  -> Free camera mode           |" << std::endl;
+  std::cout << "|    SPACE-> Pause/Resume simulation    |" << std::endl;
+  std::cout << "|    UP   -> Step forward 100 steps     |" << std::endl;
+  std::cout << "|    DOWN -> Step backward 100 steps    |" << std::endl;
+  std::cout << "|    LEFT -> Step forward 1 step        |" << std::endl;
+  std::cout << "|    RIGHT-> Step backward 1 step       |" << std::endl;
+  std::cout << "=========================================" << std::endl;
+  std::cout << "\n";
+}
+
 
 void MujocoVisualizationUtils::update(GLFWwindow* window)
 {
@@ -125,6 +132,9 @@ void MujocoVisualizationUtils::update(GLFWwindow* window)
     sensor_show(smallviewport);
   }
 
+    // Display simulation time
+  display_simulation_time(viewport);
+
   // swap OpenGL buffers (blocking call due to v-sync)
   glfwSwapBuffers(window);
 
@@ -138,6 +148,13 @@ void MujocoVisualizationUtils::terminate()
   mjr_freeContext(&con);
   mjv_freeScene(&scn);
   glfwTerminate();
+}
+
+void MujocoVisualizationUtils::display_simulation_time(const mjrRect& viewport)
+{
+  std::ostringstream oss;
+  oss << "Simulation Time: " << std::fixed << std::setprecision(2) << mujoco_data_->time << " s";
+  mjr_overlay(mjFONT_NORMAL, mjGRID_TOPLEFT, viewport, oss.str().c_str(), NULL, &con);
 }
 
 void MujocoVisualizationUtils::keyboard_callback(GLFWwindow* window, int key, int scancode, int act, int mods)
@@ -382,16 +399,53 @@ void MujocoVisualizationUtils::mouse_move_cb_implementation(GLFWwindow* window, 
                     glfwGetKey(window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS);
 
   // determine action based on mouse button
-  mjtMouse action;
-  if (button_right)
-      action = mod_shift ? mjMOUSE_MOVE_H : mjMOUSE_MOVE_V;
-  else if (button_left)
-      action = mod_shift ? mjMOUSE_ROTATE_H : mjMOUSE_ROTATE_V;
-  else
-      action = mjMOUSE_ZOOM;
+  if (mod_shift)
+    {
+      // ---- cam.azimuth / cam.elevation は degree 前提 ----
+      auto deg2rad = [](double d){ return d * (std::acos(-1.0) / 180.0); };
+      const double az = deg2rad(cam.azimuth);
+      const double el = deg2rad(cam.elevation);
 
-  // move camera
-  mjv_moveCamera(mujoco_model_, action, dx/height, dy/height, &scn, &cam);
+      const double ca = std::cos(az);
+      const double sa = std::sin(az);
+      const double ce = std::cos(el);
+      const double se = std::sin(el);
+
+      // 基底軸 (az=0, el=0) で forward=[0,-1,0], right=[1,0,0], up=[0,0,1]
+      // R = Rz(az) * Rx(el) をかけた結果（ワールド座標）
+      double cam_forward[3] = {  sa,      -ca*ce,    -ca*se };
+      double cam_right[3]   = {  ca,       sa*ce,     sa*se };
+      double cam_up[3]      = {  0.0,      -se,        ce   };
+
+      // right を念のため正規化（ほぼ単位長だが数値誤差対策）
+      double rn = std::sqrt(cam_right[0]*cam_right[0] +
+                            cam_right[1]*cam_right[1] +
+                            cam_right[2]*cam_right[2]);
+      if (rn > 1e-12) {
+        cam_right[0] /= rn; cam_right[1] /= rn; cam_right[2] /= rn;
+      }
+
+      // マウス移動に比例して lookat をパン（画面右を +dx、上を +dy とする）
+      const double sx = static_cast<double>(dx) / static_cast<double>(width);
+      const double sy = static_cast<double>(dy) / static_cast<double>(height);
+
+      cam.lookat[0] -= cam.distance * (sx*cam_right[0] + sy*cam_up[0]);
+      cam.lookat[1] -= cam.distance * (sx*cam_right[1] + sy*cam_up[1]);
+      cam.lookat[2] -= cam.distance * (sx*cam_right[2] + sy*cam_up[2]);
+    }
+  else
+  {
+      // Normal mouse behavior: rotate or zoom the camera
+      mjtMouse action;
+      if (button_right)
+          action = mjMOUSE_MOVE_H;
+      else if (button_left)
+          action = mjMOUSE_ROTATE_H;
+      else
+          action = mjMOUSE_ZOOM;
+
+      mjv_moveCamera(mujoco_model_, action, dx / height, dy / height, &scn, &cam);
+  }
 }
 
 void MujocoVisualizationUtils::mouse_button_callback(GLFWwindow* window, int button, int act, int mods)

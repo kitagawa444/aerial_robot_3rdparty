@@ -91,6 +91,8 @@ protected:
   double lastx;
   double lasty;
 
+  void print_key_bindings();
+
   static void keyboard_callback(GLFWwindow* window, int key, int scancode, int act, int mods);
 
   void keyboard_cb_implementation(GLFWwindow* window, int key, int scancode, int act, int mods);
@@ -106,6 +108,8 @@ protected:
   static void mouse_button_callback(GLFWwindow* window, int button, int act, int mods);
 
   void mouse_button_cb_implementation(GLFWwindow* window, int button, int act, int mods);
+
+  void display_simulation_time(const mjrRect& viewport);
 
   void profiler_init();
 
