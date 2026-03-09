@@ -9,12 +9,8 @@ namespace mujoco_ros_control
                               mjData* mujoco_data
                               )
   {
-    // // init 内で rosparam を読む例
-    // model_nh.param("use_ros_control", use_ros_control_, true);
-    // model_nh.param("use_control_input", use_control_input_, false);
-    // model_nh.param("control_input_as_feedforward", control_input_as_feedforward_, false);
-    // model_nh.param("publish_joint_states_manually", publish_joint_states_manually_, false);
-    // model_nh.param("allow_direct_state_set", allow_direct_state_set_, true);
+    model_nh.param("use_ros_control", use_ros_control_, false);
+    model_nh.param("allow_direct_state_set", allow_direct_state_set_, true);
 
     mujoco_model_ = mujoco_model;
     mujoco_data_ = mujoco_data;
@@ -102,11 +98,11 @@ namespace mujoco_ros_control
 
   void DefaultRobotHWSim::read(const ros::Time& time, const ros::Duration& period)
   {
-    // 1) ros_control 用バッファへ反映
     const mjtNum* qpos = mujoco_data_->qpos;
     const mjtNum* qvel = mujoco_data_->qvel;
-    const mjtNum* qfrc_act = mujoco_data_->qfrc_actuator; // DOF ごとの一般化力
 
+    // 1) ros_control 用バッファへ反映
+    const mjtNum* qfrc_act = mujoco_data_->qfrc_actuator;
     for (size_t i = 0; i < joint_names_.size(); ++i)
       {
         int j = mj_name2id(mujoco_model_, mjOBJ_JOINT, joint_names_[i].c_str());
@@ -120,20 +116,29 @@ namespace mujoco_ros_control
         eff_[i] = qfrc_act[dofadr];
       }
 
-    // 2) 自前 joint_states を出す場合（joint_state_controller を使わない時のみ）
-    if (publish_joint_states_manually_)
+    // 2) joint_states トピックを publish
+    if((time - last_joint_state_time_).toSec() >= joint_state_pub_rate_)
       {
-        if ((time - last_joint_state_time_).toSec() >= joint_state_pub_rate_)
+        sensor_msgs::JointState joint_state_msg;
+        joint_state_msg.header.stamp = time;
+        joint_state_msg.name = joint_names_;
+
+        mjtNum* actuator_force = mujoco_data_->actuator_force;
+        int* jnt_qposadr = mujoco_model_->jnt_qposadr;
+        int* jnt_dofadr = mujoco_model_->jnt_dofadr;
+
+        for(size_t k = 0; k < joint_names_.size(); k++)
           {
-            sensor_msgs::JointState js;
-            js.header.stamp = time;
-            js.name = joint_names_;
-            js.position = pos_;
-            js.velocity = vel_;
-            js.effort   = eff_;
-            joint_state_pub_.publish(js);
-            last_joint_state_time_ = time;
+            int jid = mj_name2id(mujoco_model_, mjOBJ_JOINT, joint_names_[k].c_str());
+            if (jid < 0) continue;
+            joint_state_msg.position.push_back(qpos[jnt_qposadr[jid]]);
+            joint_state_msg.velocity.push_back(qvel[jnt_dofadr[jid]]);
+            int act = act_id_by_joint_idx_[k];
+            joint_state_msg.effort.push_back(act >= 0 ? actuator_force[act] : 0.0);
           }
+
+        joint_state_pub_.publish(joint_state_msg);
+        last_joint_state_time_ = time;
       }
   }
 
@@ -145,35 +150,35 @@ namespace mujoco_ros_control
 
 void DefaultRobotHWSim::write(const ros::Time& time, const ros::Duration& period)
 {
-  // 1) ctrl を決定
-  //    - use_ros_control_ が true の場合: cmd_eff_ を使用
-  //    - use_control_input_ が true の場合:
-  //        * control_input_as_feedforward_ なら cmd_eff_ に加算
-  //        * そうでなければ control_input_ を単独で使用（旧経路優先）
-  for (size_t i = 0; i < joint_names_.size(); ++i)
+  // 1) control_input_（トピック経由）を全アクチュエータの ctrl に書き込む
+  for(size_t i = 0; i < control_input_.size(); i++)
     {
-      int act = act_id_by_joint_idx_[i];
-      if (act < 0) continue;
-
-      double u = 0.0;
-      if (use_ros_control_) u += cmd_eff_[i];
-      if (use_control_input_)
-        {
-          if (control_input_as_feedforward_) u += (act < (int)control_input_.size() ? control_input_[act] : 0.0);
-          else                               u  = (act < (int)control_input_.size() ? control_input_[act] : 0.0);
-        }
-
-      double lo = -std::numeric_limits<double>::infinity();
-      double hi =  std::numeric_limits<double>::infinity();
-      if (mujoco_model_->actuator_ctrllimited[act])
-        {
-          lo = mujoco_model_->actuator_ctrlrange[2*act+0];
-          hi = mujoco_model_->actuator_ctrlrange[2*act+1];
-        }
-      mujoco_data_->ctrl[act] = clip(u, lo, hi);
+      mujoco_data_->ctrl[i] = control_input_[i];
     }
 
-  // 2) 直接書き換え（テレポート）。頻繁にやると数値的に不安定になるので注意
+  // 2) ros_control の cmd_eff_ を加算
+  if (use_ros_control_)
+    {
+      for (size_t i = 0; i < joint_names_.size(); ++i)
+        {
+          int act = act_id_by_joint_idx_[i];
+          if (act < 0) continue;
+          mujoco_data_->ctrl[act] += cmd_eff_[i];
+        }
+    }
+
+  // 3) ctrl limit を適用
+  for (int i = 0; i < mujoco_model_->nu; ++i)
+    {
+      if (mujoco_model_->actuator_ctrllimited[i])
+        {
+          double lo = mujoco_model_->actuator_ctrlrange[2*i+0];
+          double hi = mujoco_model_->actuator_ctrlrange[2*i+1];
+          mujoco_data_->ctrl[i] = clip(mujoco_data_->ctrl[i], lo, hi);
+        }
+    }
+
+  // 4) 直接書き換え（テレポート）。頻繁にやると数値的に不安定になるので注意
   if (allow_direct_state_set_)
     {
       bool teleported = false;

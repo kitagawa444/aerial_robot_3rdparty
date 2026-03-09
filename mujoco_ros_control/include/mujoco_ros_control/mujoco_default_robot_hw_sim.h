@@ -63,10 +63,7 @@ namespace mujoco_ros_control
     // 関節インデックス → アクチュエータ ID（ctrl 配列のインデックス）対応
     std::vector<int> act_id_by_joint_idx_;
 
-    bool use_ros_control_{true};
-    bool use_control_input_{false};            // 旧経路の直接 ctrl 入力を許可
-    bool control_input_as_feedforward_{false}; // 上記を FF として加算
-    bool publish_joint_states_manually_{false};
+    bool use_ros_control_{false};
     bool allow_direct_state_set_{true};        // テレポート許可
 
   };
