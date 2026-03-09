@@ -9,9 +9,13 @@ import os
 import sys
 import rospy
 import shutil
+import json
+import copy
 
 rotor_list = []
 joint_list = []
+mesh_texture_map = {}  # mesh_name -> texture_filename
+mesh_color_map = {}  # mesh_name -> "r g b a" string from DAE diffuse color
 rospack = rospkg.RosPack()
 
 
@@ -43,8 +47,12 @@ def run_xacro(input_path, output_path):
 def process_urdf(package, urdf_path, workdir_path):
     global rotor_list
     global joint_list
+    global mesh_texture_map
+    global mesh_color_map
     rotor_list = []
     joint_list = []
+    mesh_texture_map = {}
+    mesh_color_map = {}
     urdf_tree = ET.parse(urdf_path)
     urdf_root = urdf_tree.getroot()
 
@@ -57,6 +65,9 @@ def process_urdf(package, urdf_path, workdir_path):
 
     # fix mesh path in visual tag
     for link in urdf_root.findall("link"):
+        visuals_to_remove = []
+        visuals_to_add = []
+
         for link_visual in link.findall("visual"):
             for link_visual_geometry in link_visual.findall("geometry"):
                 for link_visual_geometry_mesh in link_visual_geometry.findall("mesh"):
@@ -67,21 +78,74 @@ def process_urdf(package, urdf_path, workdir_path):
                     filename = filename[filename.find("/"):]
                     filepath = rospack.get_path(package) + filename
 
-                    # modify extention
-                    filename, ex = os.path.splitext(filepath)
-                    filepath = filename + ".stl"
-                    filename = get_filename(filepath)
+                    # get base path and mesh directory
+                    base_path, ex = os.path.splitext(filepath)
+                    mesh_dir = get_directory(base_path)
+                    mesh_base = get_filename(base_path)
 
-                    # copy stl to working directory
-                    shutil.copy(filepath, workdir_path)
+                    # check for meta JSON from convert.py
+                    meta_path = os.path.join(mesh_dir, mesh_base + "_meta.json")
 
-                    # add geometry in visual tag
-                    geometry_elem = ET.Element('geometry')
-                    mesh_elem = ET.Element("mesh")
-                    mesh_elem.set("filename", filename)
-                    geometry_elem.append(mesh_elem)
-                    link_visual.remove(link_visual_geometry)
-                    link_visual.append(geometry_elem)
+                    if os.path.isfile(meta_path):
+                        with open(meta_path) as mf:
+                            meta = json.load(mf)
+                        sub_meshes = meta["sub_meshes"]
+
+                        # copy all sub-mesh files to workdir and register colors/textures
+                        for sub in sub_meshes:
+                            obj_src = os.path.join(mesh_dir, sub["file"])
+                            if os.path.isfile(obj_src):
+                                shutil.copy(obj_src, workdir_path)
+                            # handle texture
+                            if sub.get("texture"):
+                                tex_src = os.path.join(mesh_dir, sub["texture"])
+                                if os.path.isfile(tex_src):
+                                    shutil.copy(tex_src, workdir_path)
+                                    mesh_texture_map[sub["name"]] = sub["texture"]
+                            # handle color (only if no texture)
+                            if sub.get("color") and sub["name"] not in mesh_texture_map:
+                                mesh_color_map[sub["name"]] = sub["color"]
+
+                        if len(sub_meshes) == 1:
+                            # single sub-mesh: update geometry in place
+                            geometry_elem = ET.Element('geometry')
+                            mesh_elem = ET.Element("mesh")
+                            mesh_elem.set("filename", sub_meshes[0]["file"])
+                            geometry_elem.append(mesh_elem)
+                            link_visual.remove(link_visual_geometry)
+                            link_visual.append(geometry_elem)
+                        else:
+                            # multiple sub-meshes: split into multiple visuals
+                            origin = link_visual.find("origin")
+                            visuals_to_remove.append(link_visual)
+                            for sub in sub_meshes:
+                                new_visual = ET.Element("visual")
+                                if origin is not None:
+                                    new_visual.append(copy.deepcopy(origin))
+                                new_geometry = ET.Element("geometry")
+                                new_mesh = ET.Element("mesh")
+                                new_mesh.set("filename", sub["file"])
+                                new_geometry.append(new_mesh)
+                                new_visual.append(new_geometry)
+                                visuals_to_add.append(new_visual)
+                    else:
+                        # fallback: no meta JSON, try direct OBJ
+                        filepath = base_path + ".obj"
+                        filename = get_filename(filepath)
+                        if os.path.isfile(filepath):
+                            shutil.copy(filepath, workdir_path)
+                        geometry_elem = ET.Element('geometry')
+                        mesh_elem = ET.Element("mesh")
+                        mesh_elem.set("filename", filename)
+                        geometry_elem.append(mesh_elem)
+                        link_visual.remove(link_visual_geometry)
+                        link_visual.append(geometry_elem)
+
+        # apply deferred visual modifications
+        for v in visuals_to_remove:
+            link.remove(v)
+        for v in visuals_to_add:
+            link.append(v)
 
     # replace collision tag by mesh
     ## remove initial collision
@@ -89,17 +153,17 @@ def process_urdf(package, urdf_path, workdir_path):
         for link_collision in link.findall("collision"):
             link.remove(link_collision)
 
-    ## copy from visual
+    ## copy from visual (one collision per visual)
     for link in urdf_root.findall("link"):
-        collision_tag = ET.Element("collision")
         link_name = link.attrib["name"]
-        collision_tag.set("name", link_name)
-        visual_exist = False
-        for link_visual in link.findall("visual"):
-            visual_exist = True
+        for i, link_visual in enumerate(link.findall("visual")):
+            collision_tag = ET.Element("collision")
+            if i == 0:
+                collision_tag.set("name", link_name)
+            else:
+                collision_tag.set("name", "{}_{}".format(link_name, i))
             for link_visual_elem in link_visual:
-                collision_tag.append(link_visual_elem)
-        if visual_exist:
+                collision_tag.append(copy.deepcopy(link_visual_elem))
             link.append(collision_tag)
 
     # get actuator list
@@ -348,6 +412,45 @@ def process_xml(urdf_path, mujoco_path):
         geom.set("contype", "1")
         geom.set("conaffinity", "0")
 
+    # add textures, materials, and colors
+    global mesh_texture_map
+    global mesh_color_map
+    has_materials = mesh_texture_map or mesh_color_map
+    if has_materials:
+        asset = mujoco_root.find("asset")
+        if asset is None:
+            asset = ET.SubElement(mujoco_root, "asset")
+
+        # texture-based materials
+        for mesh_name, tex_file in mesh_texture_map.items():
+            tex_name = "tex_" + mesh_name
+            mat_name = "mat_" + mesh_name
+
+            tex_elem = ET.SubElement(asset, "texture")
+            tex_elem.set("name", tex_name)
+            tex_elem.set("file", tex_file)
+            tex_elem.set("type", "2d")
+
+            mat_elem = ET.SubElement(asset, "material")
+            mat_elem.set("name", mat_name)
+            mat_elem.set("texture", tex_name)
+
+        # color-based materials (from DAE diffuse color)
+        for mesh_name, rgba in mesh_color_map.items():
+            if mesh_name not in mesh_texture_map:
+                mat_name = "mat_" + mesh_name
+                mat_elem = ET.SubElement(asset, "material")
+                mat_elem.set("name", mat_name)
+                mat_elem.set("rgba", rgba)
+
+        # apply materials to geoms
+        all_material_meshes = set(mesh_texture_map.keys()) | set(mesh_color_map.keys())
+        for geom in mujoco_root.iter("geom"):
+            if "mesh" in geom.attrib:
+                mesh_ref = geom.attrib["mesh"]
+                if mesh_ref in all_material_meshes:
+                    geom.set("material", "mat_" + mesh_ref)
+
     # actuators
     global rotor_list
     global joint_list
@@ -407,22 +510,32 @@ def process_xml(urdf_path, mujoco_path):
     # os.remove(urdf_path)
 
 
-def convert_dae2stl(meshdir):
+def convert_dae2obj(meshdir):
     mujoco_ros_control = rospack.get_path("mujoco_ros_control")
     cmd = "python {} {}".format(os.path.join(mujoco_ros_control, "scripts/convert.py"), meshdir)
     print(cmd)
     run_subprocess(cmd)
 
 
-def remove_stl(meshdir):
+def remove_generated_meshes(meshdir):
     for foldername, subfolders, filenames in os.walk(meshdir):
         for filename in filenames:
-            if filename.endswith(".stl"):
-                dae_name = remove_extension(filename) + ".dae"
-                dae_path = os.path.join(foldername, dae_name)
-                stl_path = os.path.join(foldername, filename)
-                if os.path.isfile(dae_path):
-                    os.remove(stl_path)
+            if filename.endswith("_meta.json"):
+                meta_path = os.path.join(foldername, filename)
+                try:
+                    with open(meta_path) as f:
+                        meta = json.load(f)
+                    for sub in meta["sub_meshes"]:
+                        obj_path = os.path.join(foldername, sub["file"])
+                        if os.path.isfile(obj_path):
+                            os.remove(obj_path)
+                        if sub.get("texture"):
+                            tex_path = os.path.join(foldername, sub["texture"])
+                            if os.path.isfile(tex_path):
+                                os.remove(tex_path)
+                    os.remove(meta_path)
+                except Exception:
+                    pass
 
 
 config_path = ""
@@ -436,11 +549,15 @@ with open(config_path) as file:
     obj = yaml.safe_load(file)
     for package in obj["package"]:
         print(package)
+        if package not in obj:
+            print("Error: package '{}' not found as a key in YAML. Available keys: {}".format(
+                package, [k for k in obj.keys() if k != "package"]))
+            sys.exit(1)
         pkg_path = rospack.get_path(package)
         meshdir = os.path.join(pkg_path, obj[package]["meshdir"])
         if os.path.isdir(os.path.join(pkg_path, "mujoco")):
             shutil.rmtree(os.path.join(pkg_path, "mujoco"))
-        convert_dae2stl(meshdir)
+        convert_dae2obj(meshdir)
         for (input_path, filename) in zip(obj[package]["input"], obj[package]["filename"]):
             input_xacro_path = os.path.join(pkg_path, input_path)
             workdir_path = os.path.join(pkg_path, "mujoco", filename)
@@ -457,4 +574,4 @@ with open(config_path) as file:
 
             process_xml(output_urdf_path, mujoco_path)
 
-        remove_stl(meshdir)
+        remove_generated_meshes(meshdir)
