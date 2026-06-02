@@ -35,6 +35,7 @@
   <run_depend>sensor_msgs</run_depend>
   <run_depend>tf</run_depend>
   <run_depend>urdf</run_depend>
+  <run_depend>python3-pycollada</run_depend>
 
   <export>
     <mujoco_ros_control plugin="${prefix}/mujoco_robot_hw_sim_plugin.xml"/>
