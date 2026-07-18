@@ -7,6 +7,7 @@ ROS (catkin) パッケージ。URDF/xacro で記述されたロボットモデ�
 | コンポーネント | 説明 |
 |---|---|
 | **mujoco_model_generator.py** | YAML 設定ファイルに基づき xacro → URDF → MuJoCo XML の変換パイプラインを実行 |
+| **mujoco_scene_composer.py** | 単体ロボットの MuJoCo XML を複数複製し、prefix 付きの multi-robot scene XML を生成 |
 | **convert.py** | DAE (COLLADA) メッシュを OBJ に一括変換（テクスチャ・色情報を保持） |
 | **dae_to_mujoco_body.py** | 単体の DAE を MuJoCo `<body>` XML + OBJ として出力するユーティリティ |
 | **mujoco_ros_control (C++)** | MuJoCo をバックエンドとした `ros_control` ノード（シミュレーション実行） |
@@ -152,6 +153,68 @@ roslaunch mujoco_ros_control mujoco.launch mujoco_model:=/path/to/robot.xml
 | `headless` | `false` | `true` で GUI なし実行（CI 等） |
 | `mujoco_model` | `""` | MuJoCo XML モデルの絶対パス |
 
+### 複数ロボットを同一 MuJoCo に入れる
+
+1 台ぶんの `robot.xml` を生成したあと、`mujoco_scene_composer.py` で複数機 scene を作ります。
+
+```bash
+rosrun mujoco_ros_control mujoco_scene_composer.py /absolute/path/to/scene.yaml
+```
+
+`scene.yaml` の例:
+
+```yaml
+scene_name: bee_scene_4
+source_model: ../mujoco/bee/robot.xml
+output_model: ../mujoco/bee_scene_4.xml
+
+robots:
+  - name: bee1
+    pos: [0.0, 0.0, 0.0]
+  - name: bee2
+    pos: [1.2, 0.0, 0.0]
+  - name: bee3
+    pos: [0.0, 1.2, 0.0]
+  - name: bee4
+    pos: [1.2, 1.2, 0.0]
+```
+
+`source_model` と `output_model` は、YAML ファイル基準の相対パスでも絶対パスでも指定できます。
+
+scene composer は各ロボットの `body`、`joint`、`actuator`、`site`、`sensor`、`mesh`、`material`、`texture` 名に `bee1_` のような prefix を付け、初期位置をずらした 1 つの scene XML を出力します。
+
+実行時は `robot_namespaces` を与えると、`mujoco_ros_control` が namespace ごとに独立した `RobotHWSim` と `controller_manager` を作ります。
+
+```bash
+roslaunch mujoco_ros_control mujoco_multi.launch \
+  mujoco_model:=/path/to/bee_scene_4.xml \
+  robot_namespaces:="['bee1', 'bee2', 'bee3', 'bee4']"
+```
+
+このとき、各 namespace は次のように分離されます。
+
+- `/bee1/joint_states`, `/bee1/mujoco/ctrl_input`
+- `/bee2/joint_states`, `/bee2/mujoco/ctrl_input`
+- `/bee3/joint_states`, `/bee3/mujoco/ctrl_input`
+- `/bee4/joint_states`, `/bee4/mujoco/ctrl_input`
+
+各ロボット側の actuator / sensor 名は `<namespace>_` prefix 付きで scene XML に埋め込まれ、HWSim は自分の prefix に一致する要素だけを扱います。
+
+bee パッケージでは、Gazebo の `robot_id` ベースの起動に寄せた multi-robot launcher も使えます。
+
+```bash
+roslaunch bee mujoco_multi_module.launch robot_count:=4 spawn_x_start:=-2.0 spacing_x:=1.0
+```
+
+この launcher は次を自動で行います。
+
+- `bee/config/mujoco_model.yaml` から単体 `robot.xml` を必要に応じて生成
+- 台数に応じて multi-robot scene XML を生成
+- MuJoCo backend を 1 回だけ起動
+- `bee1` から `beeN` までの `bringup.launch` を個別 namespace で起動
+
+`grid_cols` を指定すると格子状に配置できます。`grid_cols:=0` のときは 1 列配置です。
+
 ---
 
 ## 補助スクリプト
@@ -173,6 +236,14 @@ python dae_to_mujoco_body.py input.dae [output_dir] [--body-name NAME] [--pos "x
 ```
 
 生成された `body.xml` を MuJoCo モデル内で `<include file="..."/>` でインクルードできます。
+
+### mujoco_scene_composer.py
+
+単体ロボット用の `robot.xml` から multi-robot scene XML を生成します。
+
+```bash
+python mujoco_scene_composer.py /path/to/scene.yaml
+```
 
 ---
 

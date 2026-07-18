@@ -50,23 +50,53 @@ namespace mujoco_ros_control
 
     /* hardware interface  */
     robot_hw_sim_loader_.reset(new pluginlib::ClassLoader<mujoco_ros_control::RobotHWSim>("mujoco_ros_control", "mujoco_ros_control::RobotHWSim"));
+
+    if(!nhp_.getParam("robot_namespaces", robot_namespaces_) || robot_namespaces_.empty())
+      {
+        std::string default_robot_ns = nh_.getNamespace();
+        if(default_robot_ns == "/") default_robot_ns = "";
+        else if(!default_robot_ns.empty() && default_robot_ns[0] == '/') default_robot_ns = default_robot_ns.substr(1);
+        robot_namespaces_.push_back(default_robot_ns);
+      }
+
+    robot_hw_sims_.clear();
+    controller_managers_.clear();
     try
       {
-        ros::NodeHandle simulation_nh = ros::NodeHandle(nh_, "simulation");
-        std::string plugin_name;
-        simulation_nh.param("robot_hw_sim_plugin_name", plugin_name, std::string("mujoco_ros_control/DefaultRobotHWSim"));
-        robot_hw_sim_ = robot_hw_sim_loader_->createInstance(plugin_name);
-        ROS_ERROR_STREAM("nh name:" << simulation_nh.getNamespace());
+        for(size_t i = 0; i < robot_namespaces_.size(); i++)
+          {
+            const std::string& robot_ns = robot_namespaces_[i];
+            ros::NodeHandle robot_nh = robot_ns.empty() ? nh_ : ros::NodeHandle(nh_, robot_ns);
+            ros::NodeHandle simulation_nh(robot_nh, "simulation");
+            std::string plugin_name;
+            simulation_nh.param("robot_hw_sim_plugin_name", plugin_name, std::string("mujoco_ros_control/DefaultRobotHWSim"));
+            ROS_INFO_STREAM("Creating MuJoCo robot interface for namespace '"
+                            << (robot_ns.empty() ? std::string("/") : robot_nh.getNamespace())
+                            << "' with plugin '" << plugin_name << "'");
+
+            boost::shared_ptr<mujoco_ros_control::RobotHWSim> robot_hw_sim = robot_hw_sim_loader_->createInstance(plugin_name);
+            ROS_INFO_STREAM("Created MuJoCo robot plugin instance for namespace '"
+                            << (robot_ns.empty() ? std::string("/") : robot_nh.getNamespace())
+                            << "'");
+            if(!robot_hw_sim->init(robot_ns, robot_nh, mujoco_model_, mujoco_data_))
+              {
+                ROS_ERROR_STREAM("Failed to initialize MuJoCo robot interface for namespace '"
+                                 << (robot_ns.empty() ? std::string("/") : robot_nh.getNamespace())
+                                 << "' with plugin '" << plugin_name << "'");
+                return false;
+              }
+            robot_hw_sims_.push_back(robot_hw_sim);
+            controller_managers_.push_back(boost::shared_ptr<controller_manager::ControllerManager>(new controller_manager::ControllerManager(robot_hw_sim.get(), robot_nh)));
+            ROS_INFO_STREAM("Initialized MuJoCo robot interface for namespace '"
+                            << (robot_ns.empty() ? std::string("/") : robot_nh.getNamespace())
+                            << "' with plugin '" << plugin_name << "'");
+          }
       }
     catch(pluginlib::PluginlibException& ex)
       {
         ROS_ERROR("The plugin failed to load for some reason. Error: %s", ex.what());
+        return false;
       }
-    std::string robot_ns = nh_.getNamespace().substr(1, nh_.getNamespace().size () - 1);
-    robot_hw_sim_->init(robot_ns, nh_, mujoco_model_, mujoco_data_);
-
-    /* controller */
-    controller_manager_.reset(new controller_manager::ControllerManager(robot_hw_sim_.get(), nh_));
 
     clock_pub_ =  nh_.advertise<rosgraph_msgs::Clock>("/clock", 10);
 
@@ -99,11 +129,20 @@ namespace mujoco_ros_control
 
     mj_step1(mujoco_model_, mujoco_data_);
 
-    robot_hw_sim_->read(sim_time_ros, sim_period);
+    for(size_t i = 0; i < robot_hw_sims_.size(); i++)
+      {
+        robot_hw_sims_[i]->read(sim_time_ros, sim_period);
+      }
 
-    controller_manager_->update(sim_time_ros, sim_period);
+    for(size_t i = 0; i < controller_managers_.size(); i++)
+      {
+        controller_managers_[i]->update(sim_time_ros, sim_period);
+      }
 
-    robot_hw_sim_->write(sim_time_ros, sim_period);
+    for(size_t i = 0; i < robot_hw_sims_.size(); i++)
+      {
+        robot_hw_sims_[i]->write(sim_time_ros, sim_period);
+      }
 
     mj_step2(mujoco_model_, mujoco_data_);
 

@@ -2,6 +2,21 @@ import os
 import sys
 import json
 import shutil
+import functools
+import importlib
+
+if not hasattr(functools, "cache"):
+    functools.cache = functools.lru_cache(maxsize=None)
+
+try:
+    import importlib_resources
+except ImportError:
+    importlib_resources = None
+
+if importlib_resources is not None:
+    importlib_resources_std = importlib.import_module("importlib.resources")
+    if not hasattr(importlib_resources_std, "files"):
+        importlib_resources_std.files = importlib_resources.files
 
 try:
     import trimesh

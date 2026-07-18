@@ -3,12 +3,65 @@
 namespace mujoco_ros_control
 {
 
+  bool DefaultRobotHWSim::matchesRobotNamespace(const std::string& name) const
+  {
+    if(name_prefix_.empty()) return true;
+    return name.find(name_prefix_) == 0;
+  }
+
+  std::string DefaultRobotHWSim::stripNamePrefix(const std::string& name) const
+  {
+    if(name_prefix_.empty()) return name;
+    if(name.find(name_prefix_) == 0) return name.substr(name_prefix_.size());
+    return name;
+  }
+
+  std::string DefaultRobotHWSim::qualifyName(const std::string& name) const
+  {
+    if(name_prefix_.empty() || name.find(name_prefix_) == 0) return name;
+    return name_prefix_ + name;
+  }
+
+  void DefaultRobotHWSim::registerManagedActuator(int actuator_id)
+  {
+    if(actuator_id < 0) return;
+    if(std::find(managed_actuator_ids_.begin(), managed_actuator_ids_.end(), actuator_id) == managed_actuator_ids_.end())
+      {
+        managed_actuator_ids_.push_back(actuator_id);
+      }
+  }
+
+  void DefaultRobotHWSim::resolveRootJoint()
+  {
+    root_joint_id_ = -1;
+
+    for (int body_id = 0; body_id < mujoco_model_->nbody; ++body_id)
+      {
+        const char* body_name = mj_id2name(mujoco_model_, mjOBJ_BODY, body_id);
+        if (body_name && !matchesRobotNamespace(body_name)) continue;
+        if (mujoco_model_->body_jntnum[body_id] <= 0) continue;
+
+        int joint_id = mujoco_model_->body_jntadr[body_id];
+        if (joint_id < 0) continue;
+
+        int joint_type = mujoco_model_->jnt_type[joint_id];
+        if (joint_type == mjJNT_FREE || joint_type == mjJNT_BALL)
+          {
+            root_joint_id_ = joint_id;
+            return;
+          }
+      }
+  }
+
   bool DefaultRobotHWSim::init(const std::string& robot_namespace,
                               ros::NodeHandle model_nh,
                               mjModel* mujoco_model,
                               mjData* mujoco_data
                               )
   {
+    robot_namespace_ = robot_namespace;
+    name_prefix_ = robot_namespace.empty() ? std::string("") : robot_namespace + "_";
+
     model_nh.param("use_ros_control", use_ros_control_, false);
     model_nh.param("allow_direct_state_set", allow_direct_state_set_, true);
 
@@ -21,17 +74,21 @@ namespace mujoco_ros_control
 
     control_input_.resize(mujoco_model_->nu);
     joint_list_.resize(0);
+    managed_actuator_ids_.clear();
 
     // get joint names from mujoco model
     for(int i = 0; i < mujoco_model_->njnt; i++)
       {
         if(mujoco_model_->jnt_type[i] > 1)
           {
-            joint_list_.push_back(mj_id2name(mujoco_model_, mjtObj_::mjOBJ_JOINT, i));
+            const char* joint_name = mj_id2name(mujoco_model_, mjtObj_::mjOBJ_JOINT, i);
+            if(!joint_name || !matchesRobotNamespace(joint_name)) continue;
+            joint_list_.push_back(joint_name);
 
             for(int j = 0; j < mujoco_model_->nu; j++) {
               if (actuator_trnid[2 * j] == i && actuator_trntype[j] == mjtTrn_::mjTRN_JOINT) {
                 actuator_id_list_.push_back(j);
+                registerManagedActuator(j);
               }
             }
           }
@@ -46,17 +103,24 @@ namespace mujoco_ros_control
 
 
     // 1DOF 
-    joint_names_.clear();
+    model_joint_names_.clear();
+    ros_joint_names_.clear();
     for (int j = 0; j < mujoco_model_->njnt; ++j)
       {
         if (mujoco_model_->jnt_type[j] > 1)
           {
             const char* jname = mj_id2name(mujoco_model_, mjOBJ_JOINT, j);
-            if (jname) joint_names_.push_back(std::string(jname));
+            if (jname && matchesRobotNamespace(jname))
+              {
+                model_joint_names_.push_back(std::string(jname));
+                ros_joint_names_.push_back(stripNamePrefix(jname));
+              }
           }
       }
 
-    const size_t nj = joint_names_.size();
+    resolveRootJoint();
+
+    const size_t nj = model_joint_names_.size();
     pos_.assign(nj, 0.0);
     vel_.assign(nj, 0.0);
     eff_.assign(nj, 0.0);
@@ -66,11 +130,12 @@ namespace mujoco_ros_control
     // 名前一致: joint 名と同名の actuator を探す
     for (size_t i = 0; i < nj; ++i)
       {
-        int act_id = mj_name2id(mujoco_model_, mjOBJ_ACTUATOR, joint_names_[i].c_str());
+        int act_id = mj_name2id(mujoco_model_, mjOBJ_ACTUATOR, model_joint_names_[i].c_str());
         act_id_by_joint_idx_[i] = act_id; // 無ければ -1 のまま
+        registerManagedActuator(act_id);
         if (act_id < 0)
           {
-            ROS_WARN_STREAM("No actuator found for joint " << joint_names_[i]
+            ROS_WARN_STREAM("No actuator found for joint " << model_joint_names_[i]
                             << ". This joint will be read-only.");
           }
       }
@@ -78,7 +143,7 @@ namespace mujoco_ros_control
     // JointStateInterface 登録
     for (size_t i = 0; i < nj; ++i)
       {
-        hardware_interface::JointStateHandle sh(joint_names_[i], &pos_[i], &vel_[i], &eff_[i]);
+        hardware_interface::JointStateHandle sh(ros_joint_names_[i], &pos_[i], &vel_[i], &eff_[i]);
         jnt_state_interface_.registerHandle(sh);
       }
     registerInterface(&jnt_state_interface_);
@@ -86,7 +151,7 @@ namespace mujoco_ros_control
     // EffortJointInterface 登録（書き込み先は cmd_eff_）
     for (size_t i = 0; i < nj; ++i)
       {
-        hardware_interface::JointHandle eh(jnt_state_interface_.getHandle(joint_names_[i]), &cmd_eff_[i]);
+        hardware_interface::JointHandle eh(jnt_state_interface_.getHandle(ros_joint_names_[i]), &cmd_eff_[i]);
         effort_jnt_interface_.registerHandle(eh);
       }
     registerInterface(&effort_jnt_interface_);
@@ -103,9 +168,9 @@ namespace mujoco_ros_control
 
     // 1) ros_control 用バッファへ反映
     const mjtNum* qfrc_act = mujoco_data_->qfrc_actuator;
-    for (size_t i = 0; i < joint_names_.size(); ++i)
+    for (size_t i = 0; i < model_joint_names_.size(); ++i)
       {
-        int j = mj_name2id(mujoco_model_, mjOBJ_JOINT, joint_names_[i].c_str());
+        int j = mj_name2id(mujoco_model_, mjOBJ_JOINT, model_joint_names_[i].c_str());
         if (j < 0) continue;
 
         int qposadr = mujoco_model_->jnt_qposadr[j];
@@ -121,15 +186,15 @@ namespace mujoco_ros_control
       {
         sensor_msgs::JointState joint_state_msg;
         joint_state_msg.header.stamp = time;
-        joint_state_msg.name = joint_names_;
+        joint_state_msg.name = ros_joint_names_;
 
         mjtNum* actuator_force = mujoco_data_->actuator_force;
         int* jnt_qposadr = mujoco_model_->jnt_qposadr;
         int* jnt_dofadr = mujoco_model_->jnt_dofadr;
 
-        for(size_t k = 0; k < joint_names_.size(); k++)
+        for(size_t k = 0; k < model_joint_names_.size(); k++)
           {
-            int jid = mj_name2id(mujoco_model_, mjOBJ_JOINT, joint_names_[k].c_str());
+            int jid = mj_name2id(mujoco_model_, mjOBJ_JOINT, model_joint_names_[k].c_str());
             if (jid < 0) continue;
             joint_state_msg.position.push_back(qpos[jnt_qposadr[jid]]);
             joint_state_msg.velocity.push_back(qvel[jnt_dofadr[jid]]);
@@ -151,15 +216,16 @@ namespace mujoco_ros_control
 void DefaultRobotHWSim::write(const ros::Time& time, const ros::Duration& period)
 {
   // 1) control_input_（トピック経由）を全アクチュエータの ctrl に書き込む
-  for(size_t i = 0; i < control_input_.size(); i++)
+  for(size_t idx = 0; idx < managed_actuator_ids_.size(); idx++)
     {
-      mujoco_data_->ctrl[i] = control_input_[i];
+      int actuator_id = managed_actuator_ids_[idx];
+      mujoco_data_->ctrl[actuator_id] = control_input_[actuator_id];
     }
 
   // 2) ros_control の cmd_eff_ を加算
   if (use_ros_control_)
     {
-      for (size_t i = 0; i < joint_names_.size(); ++i)
+      for (size_t i = 0; i < model_joint_names_.size(); ++i)
         {
           int act = act_id_by_joint_idx_[i];
           if (act < 0) continue;
@@ -184,25 +250,26 @@ void DefaultRobotHWSim::write(const ros::Time& time, const ros::Duration& period
       bool teleported = false;
 
       // root pose
-      if (direct_root_pose_flag_)
+      if (direct_root_pose_flag_ && root_joint_id_ >= 0)
         {
           mjtNum* qpos = mujoco_data_->qpos;
-          switch (mujoco_model_->jnt_type[0]) {
+          int qposadr = mujoco_model_->jnt_qposadr[root_joint_id_];
+          switch (mujoco_model_->jnt_type[root_joint_id_]) {
           case mjJNT_FREE:
-            qpos[0] = direct_root_pose_.position.x;
-            qpos[1] = direct_root_pose_.position.y;
-            qpos[2] = direct_root_pose_.position.z;
-            qpos[3] = direct_root_pose_.orientation.w;
-            qpos[4] = direct_root_pose_.orientation.x;
-            qpos[5] = direct_root_pose_.orientation.y;
-            qpos[6] = direct_root_pose_.orientation.z;
+            qpos[qposadr + 0] = direct_root_pose_.position.x;
+            qpos[qposadr + 1] = direct_root_pose_.position.y;
+            qpos[qposadr + 2] = direct_root_pose_.position.z;
+            qpos[qposadr + 3] = direct_root_pose_.orientation.w;
+            qpos[qposadr + 4] = direct_root_pose_.orientation.x;
+            qpos[qposadr + 5] = direct_root_pose_.orientation.y;
+            qpos[qposadr + 6] = direct_root_pose_.orientation.z;
             teleported = true;
             break;
           case mjJNT_BALL:
-            qpos[0] = direct_root_pose_.orientation.w;
-            qpos[1] = direct_root_pose_.orientation.x;
-            qpos[2] = direct_root_pose_.orientation.y;
-            qpos[3] = direct_root_pose_.orientation.z;
+            qpos[qposadr + 0] = direct_root_pose_.orientation.w;
+            qpos[qposadr + 1] = direct_root_pose_.orientation.x;
+            qpos[qposadr + 2] = direct_root_pose_.orientation.y;
+            qpos[qposadr + 3] = direct_root_pose_.orientation.z;
             teleported = true;
             break;
           default:
@@ -219,8 +286,9 @@ void DefaultRobotHWSim::write(const ros::Time& time, const ros::Duration& period
 
           for (size_t k = 0; k < names.size(); ++k)
             {
-              int jid = mj_name2id(mujoco_model_, mjOBJ_JOINT, names[k].c_str());
-              if (jid < 0) { ROS_WARN_STREAM("mujoco: joint name " << names[k] << " does not exist"); continue; }
+              const std::string joint_name = qualifyName(names[k]);
+              int jid = mj_name2id(mujoco_model_, mjOBJ_JOINT, joint_name.c_str());
+              if (jid < 0) { ROS_WARN_STREAM("mujoco: joint name " << joint_name << " does not exist"); continue; }
 
               int qposadr = mujoco_model_->jnt_qposadr[jid];
               mujoco_data_->qpos[qposadr] = target_positions[k];
@@ -249,10 +317,11 @@ void DefaultRobotHWSim::write(const ros::Time& time, const ros::Duration& period
       }
     for(int i = 0; i < msg.name.size(); i++)
       {
-        int actuator_id = mj_name2id(mujoco_model_, mjtObj_::mjOBJ_ACTUATOR, msg.name.at(i).c_str());
+        const std::string actuator_name = qualifyName(msg.name.at(i));
+        int actuator_id = mj_name2id(mujoco_model_, mjtObj_::mjOBJ_ACTUATOR, actuator_name.c_str());
         if(actuator_id == -1)
           {
-            ROS_WARN_STREAM("mujoco: joint name " <<  msg.name.at(i) << " does not exist");
+            ROS_WARN_STREAM("mujoco: joint name " <<  actuator_name << " does not exist");
           }
         else
           {

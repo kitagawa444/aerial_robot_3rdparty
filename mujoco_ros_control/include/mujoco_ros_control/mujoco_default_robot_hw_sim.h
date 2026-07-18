@@ -34,6 +34,8 @@ namespace mujoco_ros_control
   protected:
     mjModel* mujoco_model_;
     mjData* mujoco_data_;
+    std::string robot_namespace_;
+    std::string name_prefix_;
 
     hardware_interface::JointStateInterface  jnt_state_interface_;
     hardware_interface::EffortJointInterface effort_jnt_interface_;
@@ -54,7 +56,8 @@ namespace mujoco_ros_control
     bool direct_root_pose_flag_;
 
         // 関節名・状態・コマンド格納
-    std::vector<std::string> joint_names_;
+      std::vector<std::string> model_joint_names_;
+      std::vector<std::string> ros_joint_names_;
     std::vector<double> pos_;
     std::vector<double> vel_;
     std::vector<double> eff_;
@@ -62,9 +65,17 @@ namespace mujoco_ros_control
 
     // 関節インデックス → アクチュエータ ID（ctrl 配列のインデックス）対応
     std::vector<int> act_id_by_joint_idx_;
+    std::vector<int> managed_actuator_ids_;
+    int root_joint_id_ = -1;
 
     bool use_ros_control_{false};
     bool allow_direct_state_set_{true};        // テレポート許可
+
+    bool matchesRobotNamespace(const std::string& name) const;
+    std::string stripNamePrefix(const std::string& name) const;
+    std::string qualifyName(const std::string& name) const;
+    void registerManagedActuator(int actuator_id);
+    void resolveRootJoint();
 
   };
 }
