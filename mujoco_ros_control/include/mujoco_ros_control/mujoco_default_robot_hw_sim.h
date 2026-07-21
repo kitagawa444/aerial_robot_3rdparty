@@ -66,6 +66,7 @@ namespace mujoco_ros_control
     // 関節インデックス → アクチュエータ ID（ctrl 配列のインデックス）対応
     std::vector<int> act_id_by_joint_idx_;
     std::vector<int> managed_actuator_ids_;
+    std::vector<std::string> ignored_joint_prefixes_;
     int root_joint_id_ = -1;
 
     bool use_ros_control_{false};
@@ -74,6 +75,7 @@ namespace mujoco_ros_control
     bool matchesRobotNamespace(const std::string& name) const;
     std::string stripNamePrefix(const std::string& name) const;
     std::string qualifyName(const std::string& name) const;
+    bool isIgnoredJoint(const std::string& name) const;
     void registerManagedActuator(int actuator_id);
     void resolveRootJoint();
 

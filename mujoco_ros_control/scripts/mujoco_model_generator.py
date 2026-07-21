@@ -11,6 +11,7 @@ import rospy
 import shutil
 import json
 import copy
+import math
 
 rotor_list = []
 joint_list = []
@@ -194,7 +195,142 @@ def generate_xml(urdf_path, mujoco_path):
     cmd = "{} {} {}".format(mujoco_compile_path, urdf_path, mujoco_path)
     run_subprocess(cmd)
 
-def process_xml(urdf_path, mujoco_path):
+def format_numbers(values):
+    return " ".join(str(value) for value in values)
+
+
+def add_compliant_feet(mujoco_root, feet_config):
+    """Add optional spring-loaded spherical contact pads to a MuJoCo model."""
+    if not feet_config:
+        return
+
+    parent_body_name = feet_config.get("parent_body", "base_link")
+    parent_body = None
+    for body in mujoco_root.iter("body"):
+        if body.attrib.get("name") == parent_body_name:
+            parent_body = body
+            break
+    if parent_body is None:
+        raise ValueError("compliant_feet parent body '{}' was not found".format(parent_body_name))
+
+    feet = feet_config.get("feet", [])
+    if not feet:
+        raise ValueError("compliant_feet.feet must contain at least one foot")
+
+    axis = [float(value) for value in feet_config.get("axis", [0.0, 0.0, 1.0])]
+    if len(axis) != 3:
+        raise ValueError("compliant_feet.axis must contain three values")
+    axis_norm = math.sqrt(sum(value * value for value in axis))
+    if axis_norm <= 0.0:
+        raise ValueError("compliant_feet.axis must be non-zero")
+    axis = [value / axis_norm for value in axis]
+
+    joint_range = feet_config.get("joint_range", [-0.001, 0.015])
+    if len(joint_range) != 2 or float(joint_range[0]) >= float(joint_range[1]):
+        raise ValueError("compliant_feet.joint_range must be [lower, upper]")
+
+    stiffness = float(feet_config.get("stiffness", 600.0))
+    damping = float(feet_config.get("damping", 3.0))
+    spring_reference = float(feet_config.get("spring_reference", 0.0))
+    free_length = float(feet_config.get("free_length", 0.024))
+    shaft_radius = float(feet_config.get("shaft_radius", 0.003))
+    shaft_mass = float(feet_config.get("shaft_mass", 0.001))
+    ball_radius = float(feet_config.get("ball_radius", 0.012))
+    ball_mass = float(feet_config.get("ball_mass", 0.006))
+    friction = feet_config.get("friction", [1.2, 0.02, 0.001])
+    solref = feet_config.get("solref", [0.01, 1.0])
+    solimp = feet_config.get("solimp", [0.9, 0.95, 0.003])
+    ball_rgba = feet_config.get("ball_rgba", [0.04, 0.04, 0.04, 1.0])
+    shaft_rgba = feet_config.get("shaft_rgba", [0.65, 0.65, 0.65, 1.0])
+
+    ball_offset = [-free_length * value for value in axis]
+    shaft_fromto = [0.0, 0.0, 0.0] + ball_offset
+
+    sensor_root = mujoco_root.find("sensor")
+    if sensor_root is None:
+        sensor_root = ET.SubElement(mujoco_root, "sensor")
+
+    foot_names = set()
+    for index, foot_config in enumerate(feet):
+        if not isinstance(foot_config, dict):
+            raise ValueError("each compliant_feet.feet entry must be a mapping")
+        foot_name = str(foot_config.get("name", index + 1))
+        if foot_name in foot_names:
+            raise ValueError("duplicate compliant foot name '{}'".format(foot_name))
+        foot_names.add(foot_name)
+
+        position = foot_config.get("pos")
+        if position is None or len(position) != 3:
+            raise ValueError("compliant foot '{}' must have a three-value pos".format(foot_name))
+
+        name_prefix = "spring_foot_{}".format(foot_name)
+        foot_body = ET.SubElement(parent_body, "body")
+        foot_body.set("name", name_prefix)
+        foot_body.set("pos", format_numbers(position))
+
+        foot_joint = ET.SubElement(foot_body, "joint")
+        foot_joint.set("name", name_prefix + "_joint")
+        foot_joint.set("type", "slide")
+        foot_joint.set("axis", format_numbers(axis))
+        foot_joint.set("limited", "true")
+        foot_joint.set("range", format_numbers(joint_range))
+        foot_joint.set("stiffness", str(stiffness))
+        foot_joint.set("damping", str(damping))
+        foot_joint.set("springref", str(spring_reference))
+
+        shaft_geom = ET.SubElement(foot_body, "geom")
+        shaft_geom.set("name", name_prefix + "_spring")
+        shaft_geom.set("type", "capsule")
+        shaft_geom.set("fromto", format_numbers(shaft_fromto))
+        shaft_geom.set("size", str(shaft_radius))
+        shaft_geom.set("mass", str(shaft_mass))
+        shaft_geom.set("contype", "0")
+        shaft_geom.set("conaffinity", "0")
+        shaft_geom.set("rgba", format_numbers(shaft_rgba))
+
+        ball_geom = ET.SubElement(foot_body, "geom")
+        ball_geom.set("name", name_prefix + "_ball")
+        ball_geom.set("type", "sphere")
+        ball_geom.set("pos", format_numbers(ball_offset))
+        ball_geom.set("size", str(ball_radius))
+        ball_geom.set("mass", str(ball_mass))
+        ball_geom.set("contype", "1")
+        ball_geom.set("conaffinity", "1")
+        ball_geom.set("condim", "6")
+        ball_geom.set("friction", format_numbers(friction))
+        ball_geom.set("solref", format_numbers(solref))
+        ball_geom.set("solimp", format_numbers(solimp))
+        ball_geom.set("rgba", format_numbers(ball_rgba))
+
+        contact_site = ET.SubElement(foot_body, "site")
+        contact_site.set("name", name_prefix + "_contact")
+        contact_site.set("type", "sphere")
+        contact_site.set("pos", format_numbers(ball_offset))
+        contact_site.set("size", str(ball_radius * 1.05))
+        contact_site.set("rgba", "0 0 0 0")
+
+        touch_sensor = ET.SubElement(sensor_root, "touch")
+        touch_sensor.set("name", name_prefix + "_touch")
+        touch_sensor.set("site", name_prefix + "_contact")
+
+        # An inline force sensor at the rubber ball centre gives the 3D
+        # contact force for this foot independently of the other feet.  The
+        # site belongs to the spring-loaded child body, so MuJoCo reports the
+        # force transmitted between that body and base_link in site axes.
+        force_sensor = ET.SubElement(sensor_root, "force")
+        force_sensor.set("name", name_prefix + "_force")
+        force_sensor.set("site", name_prefix + "_contact")
+
+        position_sensor = ET.SubElement(sensor_root, "jointpos")
+        position_sensor.set("name", name_prefix + "_compression")
+        position_sensor.set("joint", name_prefix + "_joint")
+
+        velocity_sensor = ET.SubElement(sensor_root, "jointvel")
+        velocity_sensor.set("name", name_prefix + "_compression_velocity")
+        velocity_sensor.set("joint", name_prefix + "_joint")
+
+
+def process_xml(urdf_path, mujoco_path, model_config=None):
     mujoco_tree = ET.parse(mujoco_path)
     mujoco_root = mujoco_tree.getroot()
     urdf_tree = ET.parse(urdf_path)
@@ -489,6 +625,11 @@ def process_xml(urdf_path, mujoco_path):
     sensor_elem.append(mag)
     mujoco_root.append(sensor_elem)
 
+    # Robot-specific, MuJoCo-only contact mechanisms. The option is absent for
+    # existing configurations, so their generated models remain unchanged.
+    if model_config is not None:
+        add_compliant_feet(mujoco_root, model_config.get("compliant_feet"))
+
     # include world
     mujoco_ros_control = rospack.get_path("mujoco_ros_control")
     world_path = os.path.join(mujoco_ros_control, "config/world.xml")
@@ -572,6 +713,6 @@ with open(config_path) as file:
             mujoco_path = os.path.join(workdir_path, "robot.xml")
             generate_xml(output_urdf_path, mujoco_path)
 
-            process_xml(output_urdf_path, mujoco_path)
+            process_xml(output_urdf_path, mujoco_path, obj[package])
 
         remove_generated_meshes(meshdir)

@@ -84,6 +84,42 @@ my_robot_description:
     - with_arm
 ```
 
+### MuJoCo専用のばね付き接触パッド（任意）
+
+URDFを変更せず、生成したMuJoCoモデルだけにslide joint、ばね、球形接触geom、
+接触・圧縮量センサを追加できます。`compliant_feet` を省略した既存設定の出力は
+変わりません。
+
+```yaml
+my_robot_description:
+  meshdir: meshes
+  input: [urdf/robot.urdf.xacro]
+  filename: [default]
+  compliant_feet:
+    parent_body: base_link
+    axis: [0, 0, 1]                 # 正方向が圧縮方向
+    joint_range: [-0.001, 0.015]   # m
+    stiffness: 600.0               # N/m
+    damping: 3.0                   # N s/m
+    free_length: 0.024             # 取付点から球中心までの距離
+    ball_radius: 0.012
+    friction: [1.2, 0.02, 0.001]   # sliding, torsional, rolling
+    feet:
+      - {name: front, pos: [0.07, 0.0, -0.08]}
+      - {name: rear,  pos: [-0.07, 0.0, -0.08]}
+```
+
+各足について `spring_foot_<name>_touch`、`spring_foot_<name>_force`、
+`spring_foot_<name>_compression`、`spring_foot_<name>_compression_velocity`
+センサが生成されます。`force` は各siteのbodyと親bodyの間を伝わる3軸力です。
+ばねjointをROSの通常の`joint_states`へ混ぜない場合は、ロボット側のsimulation設定へ
+以下を追加します。未設定時は従来どおり全jointを登録・publishします。
+
+```yaml
+simulation:
+  ignored_mujoco_joint_prefixes: [spring_foot_]
+```
+
 ### 処理の流れ
 
 ```
@@ -167,6 +203,7 @@ rosrun mujoco_ros_control mujoco_scene_composer.py /absolute/path/to/scene.yaml
 scene_name: bee_scene_4
 source_model: ../mujoco/bee/robot.xml
 output_model: ../mujoco/bee_scene_4.xml
+jacobian: dense  # 4台 + free objectではMuJoCo 2.3.xの安定性のため推奨
 
 robots:
   - name: bee1
@@ -177,11 +214,27 @@ robots:
     pos: [0.0, 1.2, 0.0]
   - name: bee4
     pos: [1.2, 1.2, 0.0]
+
+objects:
+  - name: grasp_pedestal
+    type: cylinder
+    size: [0.09, 0.65]  # [radius, height]
+    pos: [0.6, 0.6, 0.325]
+    friction: [1.2, 0.02, 0.001]
+  - name: grasp_prism
+    type: triangular_prism
+    # 正三角形断面をXY、高さ方向をZにした自由物体
+    size: [0.36, 0.30]  # [triangle_side, height]
+    mass: 0.50
+    pos: [0.6, 0.6, 0.802]
+    friction: [1.2, 0.02, 0.001]
 ```
 
 `source_model` と `output_model` は、YAML ファイル基準の相対パスでも絶対パスでも指定できます。
 
 scene composer は各ロボットの `body`、`joint`、`actuator`、`site`、`sensor`、`mesh`、`material`、`texture` 名に `bee1_` のような prefix を付け、初期位置をずらした 1 つの scene XML を出力します。
+`objects` はprefixを付けずsceneへ1回だけ追加されます。`triangular_prism` はinlineの
+convex meshと`freejoint`で生成されるため、床やロボットと接触し、把持後に持ち上げられます。
 
 実行時は `robot_namespaces` を与えると、`mujoco_ros_control` が namespace ごとに独立した `RobotHWSim` と `controller_manager` を作ります。
 
@@ -205,6 +258,12 @@ bee パッケージでは、Gazebo の `robot_id` ベースの起動に寄せた
 ```bash
 roslaunch bee mujoco_multi_module.launch robot_count:=4 spawn_x_start:=-2.0 spacing_x:=1.0
 ```
+
+このlauncherは既定で、高さ0.65 m・半径0.09 mの細いpedestalと、3側面から把持できる
+正三角柱（一辺0.36 m、高さ0.30 m、質量0.5 kg）を追加します。三角柱の中心は
+`(0, 1, 0.802)`です。pedestalを使わず床へ置く場合は
+`spawn_object_pedestal:=false`を指定します。
+物体なしの従来sceneは`spawn_object:=false`で起動できます。
 
 この launcher は次を自動で行います。
 

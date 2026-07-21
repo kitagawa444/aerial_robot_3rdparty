@@ -22,6 +22,16 @@ namespace mujoco_ros_control
     return name_prefix_ + name;
   }
 
+  bool DefaultRobotHWSim::isIgnoredJoint(const std::string& name) const
+  {
+    const std::string unqualified_name = stripNamePrefix(name);
+    for(const std::string& prefix : ignored_joint_prefixes_)
+      {
+        if(unqualified_name.find(prefix) == 0) return true;
+      }
+    return false;
+  }
+
   void DefaultRobotHWSim::registerManagedActuator(int actuator_id)
   {
     if(actuator_id < 0) return;
@@ -64,6 +74,8 @@ namespace mujoco_ros_control
 
     model_nh.param("use_ros_control", use_ros_control_, false);
     model_nh.param("allow_direct_state_set", allow_direct_state_set_, true);
+    ignored_joint_prefixes_.clear();
+    model_nh.getParam("simulation/ignored_mujoco_joint_prefixes", ignored_joint_prefixes_);
 
     mujoco_model_ = mujoco_model;
     mujoco_data_ = mujoco_data;
@@ -83,6 +95,7 @@ namespace mujoco_ros_control
           {
             const char* joint_name = mj_id2name(mujoco_model_, mjtObj_::mjOBJ_JOINT, i);
             if(!joint_name || !matchesRobotNamespace(joint_name)) continue;
+            if(isIgnoredJoint(joint_name)) continue;
             joint_list_.push_back(joint_name);
 
             for(int j = 0; j < mujoco_model_->nu; j++) {
@@ -110,7 +123,7 @@ namespace mujoco_ros_control
         if (mujoco_model_->jnt_type[j] > 1)
           {
             const char* jname = mj_id2name(mujoco_model_, mjOBJ_JOINT, j);
-            if (jname && matchesRobotNamespace(jname))
+            if (jname && matchesRobotNamespace(jname) && !isIgnoredJoint(jname))
               {
                 model_joint_names_.push_back(std::string(jname));
                 ros_joint_names_.push_back(stripNamePrefix(jname));
