@@ -51,12 +51,18 @@ namespace mujoco_ros_control
     /* hardware interface  */
     robot_hw_sim_loader_.reset(new pluginlib::ClassLoader<mujoco_ros_control::RobotHWSim>("mujoco_ros_control", "mujoco_ros_control::RobotHWSim"));
 
-    if(!nhp_.getParam("robot_namespaces", robot_namespaces_) || robot_namespaces_.empty())
+    const bool use_model_name_prefixes =
+      nhp_.getParam("robot_namespaces", robot_namespaces_) && !robot_namespaces_.empty();
+    if(!use_model_name_prefixes)
       {
-        std::string default_robot_ns = nh_.getNamespace();
-        if(default_robot_ns == "/") default_robot_ns = "";
-        else if(!default_robot_ns.empty() && default_robot_ns[0] == '/') default_robot_ns = default_robot_ns.substr(1);
-        robot_namespaces_.push_back(default_robot_ns);
+        // Legacy single-model mode:
+        // Keep the node's existing ROS namespace for parameters, topics and the
+        // controller manager, but do not interpret that namespace as a MuJoCo
+        // model-name prefix.  For example, a node launched in /world must keep
+        // using /world/simulation and must manage joints such as black_* rather
+        // than looking for non-existent world_* joints.
+        robot_namespaces_.clear();
+        robot_namespaces_.push_back("");
       }
 
     robot_hw_sims_.clear();
@@ -71,24 +77,24 @@ namespace mujoco_ros_control
             std::string plugin_name;
             simulation_nh.param("robot_hw_sim_plugin_name", plugin_name, std::string("mujoco_ros_control/DefaultRobotHWSim"));
             ROS_INFO_STREAM("Creating MuJoCo robot interface for namespace '"
-                            << (robot_ns.empty() ? std::string("/") : robot_nh.getNamespace())
+                            << robot_nh.getNamespace()
                             << "' with plugin '" << plugin_name << "'");
 
             boost::shared_ptr<mujoco_ros_control::RobotHWSim> robot_hw_sim = robot_hw_sim_loader_->createInstance(plugin_name);
             ROS_INFO_STREAM("Created MuJoCo robot plugin instance for namespace '"
-                            << (robot_ns.empty() ? std::string("/") : robot_nh.getNamespace())
+                            << robot_nh.getNamespace()
                             << "'");
             if(!robot_hw_sim->init(robot_ns, robot_nh, mujoco_model_, mujoco_data_))
               {
                 ROS_ERROR_STREAM("Failed to initialize MuJoCo robot interface for namespace '"
-                                 << (robot_ns.empty() ? std::string("/") : robot_nh.getNamespace())
+                                 << robot_nh.getNamespace()
                                  << "' with plugin '" << plugin_name << "'");
                 return false;
               }
             robot_hw_sims_.push_back(robot_hw_sim);
             controller_managers_.push_back(boost::shared_ptr<controller_manager::ControllerManager>(new controller_manager::ControllerManager(robot_hw_sim.get(), robot_nh)));
             ROS_INFO_STREAM("Initialized MuJoCo robot interface for namespace '"
-                            << (robot_ns.empty() ? std::string("/") : robot_nh.getNamespace())
+                            << robot_nh.getNamespace()
                             << "' with plugin '" << plugin_name << "'");
           }
       }
@@ -215,4 +221,3 @@ int main(int argc, char** argv)
   if(!headless) mujoco_visualization_utils.terminate();
   return 0;
 }
-
