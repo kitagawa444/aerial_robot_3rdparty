@@ -218,8 +218,18 @@ def add_scene_objects(objects, asset_root, worldbody_root):
         ]))
 
         if object_config.get("free", True):
-            free_joint = ET.SubElement(body, "freejoint")
+            freejoint_damping = float(object_config.get("freejoint_damping", 0.0))
+            if freejoint_damping < 0.0:
+                raise ValueError("scene object freejoint_damping must be non-negative")
+            # MuJoCo's <freejoint> shorthand fixes damping to zero.  Emit the
+            # equivalent full joint only when object-specific damping is
+            # requested, preserving existing generated models by default.
+            joint_tag = "joint" if freejoint_damping > 0.0 else "freejoint"
+            free_joint = ET.SubElement(body, joint_tag)
             free_joint.set("name", name + "_root")
+            if freejoint_damping > 0.0:
+                free_joint.set("type", "free")
+                free_joint.set("damping", str(freejoint_damping))
 
         geom = ET.SubElement(body, "geom")
         geom.set("name", name + "_geom")
