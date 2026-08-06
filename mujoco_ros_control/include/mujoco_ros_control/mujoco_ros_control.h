@@ -24,6 +24,12 @@ namespace mujoco_ros_control
     mjModel* mujoco_model_;
     mjData* mujoco_data_;
     bool headless_;
+    double render_fps_;
+    bool vsync_;
+    bool render_shadows_;
+    bool render_reflections_;
+    int window_width_;
+    int window_height_;
 
   protected:
     boost::shared_ptr<pluginlib::ClassLoader<mujoco_ros_control::RobotHWSim> > robot_hw_sim_loader_;

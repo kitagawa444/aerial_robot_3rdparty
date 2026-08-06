@@ -84,6 +84,45 @@ my_robot_description:
     - with_arm
 ```
 
+### MuJoCo専用のばね付き接触パッド（任意）
+
+URDFを変更せず、生成したMuJoCoモデルだけにslide joint、ばね、球形接触geom、
+接触・圧縮量センサを追加できます。`compliant_feet` を省略した既存設定の出力は
+変わりません。
+
+```yaml
+my_robot_description:
+  meshdir: meshes
+  input: [urdf/robot.urdf.xacro]
+  filename: [default]
+  compliant_feet:
+    parent_body: base_link
+    axis: [0, 0, 1]                 # 正方向が圧縮方向
+    joint_range: [-0.001, 0.015]   # m
+    stiffness: 600.0               # N/m
+    damping: 3.0                   # N s/m
+    free_length: 0.024             # 取付点から球中心までの距離
+    ball_radius: 0.012
+    friction: [1.2, 0.02, 0.001]   # sliding, torsional, rolling
+    feet:
+      - {name: front, pos: [0.07, 0.0, -0.08]}
+      - {name: rear,  pos: [-0.07, 0.0, -0.08]}
+```
+
+`name_prefix`を指定すると同じ機構を別の接触配列として追加できます。
+Beeの把持では追加パッドを設けず、上記の物理的な4本の着地足をそのまま使用します。
+
+各足について `spring_foot_<name>_touch`、`spring_foot_<name>_force`、
+`spring_foot_<name>_compression`、`spring_foot_<name>_compression_velocity`
+センサが生成されます。`force` は各siteのbodyと親bodyの間を伝わる3軸力です。
+ばねjointをROSの通常の`joint_states`へ混ぜない場合は、ロボット側のsimulation設定へ
+以下を追加します。未設定時は従来どおり全jointを登録・publishします。
+
+```yaml
+simulation:
+  ignored_mujoco_joint_prefixes: [spring_foot_]
+```
+
 ### 処理の流れ
 
 ```
@@ -152,6 +191,26 @@ roslaunch mujoco_ros_control mujoco.launch mujoco_model:=/path/to/robot.xml
 | `robot_ns` | `/` | ロボットの名前空間 |
 | `headless` | `false` | `true` で GUI なし実行（CI 等） |
 | `mujoco_model` | `""` | MuJoCo XML モデルの絶対パス |
+| `render_fps` | `30.0` | simulation time 1秒あたりの描画回数。物理step周期は変更しない |
+| `vsync` | `false` | `true` で画面更新をVSyncへ同期 |
+| `render_shadows` | `false` | shadow描画を有効化 |
+| `render_reflections` | `false` | reflection描画を有効化 |
+| `window_width` | `960` | viewer幅 [pixel] |
+| `window_height` | `720` | viewer高さ [pixel] |
+
+WSL/WSLgでは描画と物理計算が同じthreadで実行されるため、OpenGLのbuffer転送や
+VSync待ちがsimulation timeも停止させます。multi-robot launchでは描画負荷を抑えるため
+既定を`render_fps:=10`、`vsync:=false`、shadow/reflectionなし、`640x480`としています。
+画質を上げる場合:
+
+```bash
+roslaunch bee mujoco_multi_module.launch headless:=false \
+  render_fps:=15 vsync:=false render_shadows:=true \
+  render_reflections:=true window_width:=800 window_height:=600
+```
+
+MuJoCo viewerが不要なら`headless:=true`が最速です。RViz表示は別processなので、
+MuJoCoをheadlessにしたまま`launch_rviz:=true`を使用できます。
 
 ### 複数ロボットを同一 MuJoCo に入れる
 
@@ -167,6 +226,7 @@ rosrun mujoco_ros_control mujoco_scene_composer.py /absolute/path/to/scene.yaml
 scene_name: bee_scene_4
 source_model: ../mujoco/bee/robot.xml
 output_model: ../mujoco/bee_scene_4.xml
+jacobian: dense  # 4台 + free objectではMuJoCo 2.3.xの安定性のため推奨
 
 robots:
   - name: bee1
@@ -177,11 +237,27 @@ robots:
     pos: [0.0, 1.2, 0.0]
   - name: bee4
     pos: [1.2, 1.2, 0.0]
+
+objects:
+  - name: grasp_pedestal
+    type: cylinder
+    size: [0.20, 0.65]  # [radius, height]
+    pos: [0.6, 0.6, 0.325]
+    friction: [1.2, 2.0, 0.001]
+  - name: grasp_prism
+    type: triangular_prism
+    # 正三角形断面をXY、高さ方向をZにした自由物体
+    size: [0.80, 0.30]  # [triangle_side, height]
+    mass: 1.00
+    pos: [0.6, 0.6, 0.802]
+    friction: [1.2, 2.0, 0.001]
 ```
 
 `source_model` と `output_model` は、YAML ファイル基準の相対パスでも絶対パスでも指定できます。
 
 scene composer は各ロボットの `body`、`joint`、`actuator`、`site`、`sensor`、`mesh`、`material`、`texture` 名に `bee1_` のような prefix を付け、初期位置をずらした 1 つの scene XML を出力します。
+`objects` はprefixを付けずsceneへ1回だけ追加されます。`triangular_prism` はinlineの
+convex meshと`freejoint`で生成されるため、床やロボットと接触し、把持後に持ち上げられます。
 
 実行時は `robot_namespaces` を与えると、`mujoco_ros_control` が namespace ごとに独立した `RobotHWSim` と `controller_manager` を作ります。
 
@@ -203,8 +279,38 @@ roslaunch mujoco_ros_control mujoco_multi.launch \
 bee パッケージでは、Gazebo の `robot_id` ベースの起動に寄せた multi-robot launcher も使えます。
 
 ```bash
-roslaunch bee mujoco_multi_module.launch robot_count:=4 spawn_x_start:=-2.0 spacing_x:=1.0
+roslaunch bee mujoco_multi_module.launch robot_count:=3
 ```
+
+既定ではMuJoCo backendを`headless:=true`で動かし、共有RVizを1つだけ起動します。
+RVizには`bee1`〜`bee3`、三角柱、pedestal、および各Beeの物理的な4本のばね脚が
+表示されます。ばね脚のTFにはMuJoCoで計測した圧縮量を反映します。RVizも不要な場合は
+`launch_rviz:=false`を指定します。シーンMarkerのtopicは
+`/mujoco/grasp_scene_markers`です。
+
+このlauncherは既定で、高さ0.65 m・半径0.20 mのpedestalと、3側面から把持できる
+正三角柱（一辺0.80 m、高さ0.30 m、質量1.0 kg）を追加します。三角柱の中心は
+`(0, 1, 0.802)`です。pedestalを使わず床へ置く場合は
+`spawn_object_pedestal:=false`を指定します。
+物体なしの従来sceneは`spawn_object:=false`で起動できます。
+台座上でのyaw回転を抑えるねじり摩擦は
+`object_torsional_friction`（既定2.0）で調整できます。
+
+既定の3台は三角柱の各側面法線上へ配置されます。接近前に各Beeの
+`final_target_baselink_rpy`へroll=1.57 radを指令し、横倒しにした機体の
+物理的な4本の着地足を側面へ向けます。
+初期の面からの距離は`grasp_staging_clearance`（既定0.80 m）で調整できます。
+4点の力は各namespaceの`mujoco/grasp_forces`（機体fc座標）と
+`mujoco/grasp_forces_world`（world座標）へ
+`[spring_foot_front, spring_foot_rear, spring_foot_left, spring_foot_right]`
+の順でpublishされます。これらの`grasp_*` topicは物理足センサの互換aliasです。
+4本の接触状態は`sensor_msgs/JointState`型の`mujoco/grasp_contact_states`へ
+同じ順序でpublishされ、`position`がslide joint圧縮量[m]、`velocity`が圧縮速度[m/s]、
+`effort`がMuJoCo touchセンサの法線接触力[N]です。touchとforceは同じsiteを使いますが、
+前者はsite体積内の接触法線力のスカラー和、後者は親子body間の3軸伝達力であり別センサです。
+Beeの`mujoco/external_wrench`へ`geometry_msgs/WrenchStamped`をpublishすると、
+world座標の外力・トルクがroot bodyへ加算されます。指令が0.1秒以上途切れると自動でゼロになり、
+root pose/velocityを直接変更せずMuJoCoの運動方程式と接触拘束を通して運動します。
 
 この launcher は次を自動で行います。
 

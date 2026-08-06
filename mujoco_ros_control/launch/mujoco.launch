@@ -3,11 +3,23 @@
   <arg name="robot_ns" default="/" />
   <arg name="headless" default="false" />
   <arg name="mujoco_model" default="" />
+  <arg name="render_fps" default="30.0" />
+  <arg name="vsync" default="false" />
+  <arg name="render_shadows" default="false" />
+  <arg name="render_reflections" default="false" />
+  <arg name="window_width" default="960" />
+  <arg name="window_height" default="720" />
   <rosparam param="/use_sim_time">true</rosparam>
 
   <node pkg="mujoco_ros_control" type="mujoco_ros_control" name="mujoco_ros_control" output="screen" ns="$(arg robot_ns)">
     <param name="headless" value="$(arg headless)"/>
     <param name="mujoco_model_path" value="$(arg mujoco_model)"/>
+    <param name="render_fps" value="$(arg render_fps)"/>
+    <param name="vsync" value="$(arg vsync)"/>
+    <param name="render_shadows" value="$(arg render_shadows)"/>
+    <param name="render_reflections" value="$(arg render_reflections)"/>
+    <param name="window_width" value="$(arg window_width)"/>
+    <param name="window_height" value="$(arg window_height)"/>
   </node>
 
 </launch>

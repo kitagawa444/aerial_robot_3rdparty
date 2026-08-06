@@ -36,7 +36,8 @@ public:
     return instance;
   }
 
-  void init(mjModel* mujoco_model, mjData* mujoco_data, GLFWwindow* window);
+  void init(mjModel* mujoco_model, mjData* mujoco_data, GLFWwindow* window,
+            bool render_shadows, bool render_reflections);
 
   void update(GLFWwindow* window);
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import copy
+import math
 import os
 import sys
 import xml.etree.ElementTree as ET
@@ -93,6 +94,149 @@ def prettify(root):
     return "\n".join(line for line in xmlstr.splitlines() if line.strip()) + "\n"
 
 
+def format_numbers(values):
+    return " ".join(str(value) for value in values)
+
+
+def add_scene_objects(objects, asset_root, worldbody_root):
+    """Add free-moving task objects declared in the scene YAML."""
+    object_names = set()
+    for index, object_config in enumerate(objects):
+        if not isinstance(object_config, dict):
+            raise ValueError("each objects entry must be a mapping")
+
+        name = str(object_config.get("name", "object_{}".format(index + 1)))
+        if name in object_names:
+            raise ValueError("duplicate scene object name '{}'".format(name))
+        object_names.add(name)
+
+        object_type = object_config.get("type", "triangular_prism")
+        if object_type == "cylinder":
+            size = object_config.get("size", [0.09, 0.65])
+            if len(size) != 2:
+                raise ValueError("cylinder size must be [radius, height]")
+            radius = float(size[0])
+            height = float(size[1])
+            if radius <= 0.0 or height <= 0.0:
+                raise ValueError("cylinder dimensions must be positive")
+
+            position = object_config.get("pos", [0.0, 0.0, height / 2.0])
+            if len(position) != 3:
+                raise ValueError("scene object pos must contain three values")
+
+            body = ET.SubElement(worldbody_root, "body")
+            body.set("name", name)
+            body.set("pos", format_numbers(position))
+
+            geom = ET.SubElement(body, "geom")
+            geom.set("name", name + "_geom")
+            geom.set("type", "cylinder")
+            geom.set("size", format_numbers([radius, height / 2.0]))
+            geom.set("contype", "1")
+            geom.set("conaffinity", "1")
+            geom.set("condim", "6")
+            geom.set("friction", format_numbers(object_config.get("friction", [1.2, 0.02, 0.001])))
+            geom.set("solref", format_numbers(object_config.get("solref", [0.01, 1.0])))
+            geom.set("solimp", format_numbers(object_config.get("solimp", [0.9, 0.95, 0.003])))
+            geom.set("rgba", format_numbers(object_config.get("rgba", [0.35, 0.38, 0.42, 1.0])))
+            continue
+
+        if object_type != "triangular_prism":
+            raise ValueError("unsupported scene object type '{}'".format(object_type))
+
+        size = object_config.get("size", [0.80, 0.30])
+        if len(size) != 2:
+            raise ValueError("triangular_prism size must be [triangle_side, height]")
+        triangle_side = float(size[0])
+        height = float(size[1])
+        if triangle_side <= 0.0 or height <= 0.0:
+            raise ValueError("triangular_prism dimensions must be positive")
+
+        position = object_config.get("pos", [0.0, 0.0, 0.0])
+        if len(position) != 3:
+            raise ValueError("scene object pos must contain three values")
+        mass = float(object_config.get("mass", 0.50))
+        if mass <= 0.0:
+            raise ValueError("scene object mass must be positive")
+
+        # The prism axis is Z: three robots can approach the three rectangular
+        # side faces, then a fourth can approach the triangular bottom face.
+        circumradius = triangle_side / math.sqrt(3.0)
+        x_rear = -circumradius / 2.0
+        y_side = triangle_side / 2.0
+        z_min = -height / 2.0
+        z_max = height / 2.0
+        vertices = [
+            circumradius, 0.0, z_min,
+            x_rear, y_side, z_min,
+            x_rear, -y_side, z_min,
+            circumradius, 0.0, z_max,
+            x_rear, y_side, z_max,
+            x_rear, -y_side, z_max,
+        ]
+        faces = [
+            0, 2, 1,
+            3, 4, 5,
+            0, 1, 4, 0, 4, 3,
+            1, 2, 5, 1, 5, 4,
+            2, 0, 3, 2, 3, 5,
+        ]
+
+        mesh_name = name + "_mesh"
+        mesh = ET.SubElement(asset_root, "mesh")
+        mesh.set("name", mesh_name)
+        mesh.set("vertex", format_numbers(vertices))
+        mesh.set("face", format_numbers(faces))
+
+        body = ET.SubElement(worldbody_root, "body")
+        body.set("name", name)
+        body.set("pos", format_numbers(position))
+        if "quat" in object_config:
+            quat = object_config["quat"]
+            if len(quat) != 4:
+                raise ValueError("scene object quat must contain four values")
+            body.set("quat", format_numbers(quat))
+        elif "euler" in object_config:
+            euler = object_config["euler"]
+            if len(euler) != 3:
+                raise ValueError("scene object euler must contain three values")
+            body.set("euler", format_numbers(euler))
+
+        # Use the closed-form centroidal inertia instead of relying on signed
+        # mesh-volume inference.  This is both exact for a uniform triangular
+        # prism and avoids sensitivity to face winding in MuJoCo 2.3.x.
+        horizontal_inertia = mass * (triangle_side * triangle_side / 24.0 +
+                                     height * height / 12.0)
+        vertical_inertia = mass * triangle_side * triangle_side / 12.0
+        inertial = ET.SubElement(body, "inertial")
+        inertial.set("pos", "0 0 0")
+        inertial.set("mass", str(mass))
+        inertial.set("diaginertia", format_numbers([
+            horizontal_inertia,
+            horizontal_inertia,
+            vertical_inertia,
+        ]))
+
+        if object_config.get("free", True):
+            free_joint = ET.SubElement(body, "freejoint")
+            free_joint.set("name", name + "_root")
+
+        geom = ET.SubElement(body, "geom")
+        geom.set("name", name + "_geom")
+        geom.set("type", "mesh")
+        geom.set("mesh", mesh_name)
+        geom.set("condim", "6")
+        geom.set("friction", format_numbers(object_config.get("friction", [1.2, 0.02, 0.001])))
+        geom.set("solref", format_numbers(object_config.get("solref", [0.01, 1.0])))
+        geom.set("solimp", format_numbers(object_config.get("solimp", [0.9, 0.95, 0.003])))
+        geom.set("rgba", format_numbers(object_config.get("rgba", [0.92, 0.45, 0.08, 1.0])))
+
+        centre_site = ET.SubElement(body, "site")
+        centre_site.set("name", name + "_centre")
+        centre_site.set("size", "0.005")
+        centre_site.set("rgba", "0 0 0 0")
+
+
 def compose_scene(config_path):
     with open(config_path) as file_handle:
         config = yaml.safe_load(file_handle)
@@ -128,6 +272,13 @@ def compose_scene(config_path):
     for child in source_root:
         if child.tag in passthrough_tags:
             scene_root.append(copy.deepcopy(child))
+
+    # MuJoCo 2.3.x switches from dense to sparse Jacobians at nv=60 when set
+    # to auto.  Scenes with four compliant-foot Bees plus a free payload cross
+    # that boundary and require the dense path for stable passive dynamics.
+    if config.get("jacobian") is not None:
+        option_root = get_or_create(scene_root, "option")
+        option_root.set("jacobian", str(config["jacobian"]))
 
     asset_root = get_or_create(scene_root, "asset")
     worldbody_root = get_or_create(scene_root, "worldbody")
@@ -172,6 +323,8 @@ def compose_scene(config_path):
                 sensor_child = copy.deepcopy(child)
                 prefix_tree(sensor_child, prefix)
                 sensor_root.append(sensor_child)
+
+    add_scene_objects(config.get("objects", []), asset_root, worldbody_root)
 
     include_paths = set()
     for include_elem in source_root.findall("include"):

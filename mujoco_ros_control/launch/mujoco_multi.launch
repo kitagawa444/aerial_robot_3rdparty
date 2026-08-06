@@ -3,11 +3,23 @@
   <arg name="headless" default="false" />
   <arg name="mujoco_model" default="" />
   <arg name="robot_namespaces" default="['bee1', 'bee2', 'bee3', 'bee4']" />
+  <arg name="render_fps" default="10.0" />
+  <arg name="vsync" default="false" />
+  <arg name="render_shadows" default="false" />
+  <arg name="render_reflections" default="false" />
+  <arg name="window_width" default="640" />
+  <arg name="window_height" default="480" />
   <rosparam param="/use_sim_time">true</rosparam>
 
   <node pkg="mujoco_ros_control" type="mujoco_ros_control" name="mujoco_ros_control" output="screen">
     <param name="headless" value="$(arg headless)"/>
     <param name="mujoco_model_path" value="$(arg mujoco_model)"/>
+    <param name="render_fps" value="$(arg render_fps)"/>
+    <param name="vsync" value="$(arg vsync)"/>
+    <param name="render_shadows" value="$(arg render_shadows)"/>
+    <param name="render_reflections" value="$(arg render_reflections)"/>
+    <param name="window_width" value="$(arg window_width)"/>
+    <param name="window_height" value="$(arg window_height)"/>
     <rosparam param="robot_namespaces" subst_value="true">$(arg robot_namespaces)</rosparam>
   </node>
 

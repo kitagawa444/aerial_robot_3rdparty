@@ -26,7 +26,8 @@
 #include <iostream>
 #include <iomanip>
 
-void MujocoVisualizationUtils::init(mjModel* mujoco_model, mjData* mujoco_data, GLFWwindow* window)
+void MujocoVisualizationUtils::init(mjModel* mujoco_model, mjData* mujoco_data, GLFWwindow* window,
+                                    bool render_shadows, bool render_reflections)
 {
   ROS_INFO("Initializing GL functions");
   // save references
@@ -55,6 +56,8 @@ void MujocoVisualizationUtils::init(mjModel* mujoco_model, mjData* mujoco_data, 
 
   // initialize MuJoCo visualization
   mjv_makeScene(mujoco_model_, &scn, 1000);
+  scn.flags[mjRND_SHADOW] = render_shadows;
+  scn.flags[mjRND_REFLECTION] = render_reflections;
   mjv_defaultCamera(&cam);
   mjv_defaultOption(&opt);
   mjr_defaultContext(&con);
@@ -927,4 +930,3 @@ void MujocoVisualizationUtils::clear_timers(mjData* mujoco_data)
         mujoco_data->timer[i].number = 0;
     }
 }
-

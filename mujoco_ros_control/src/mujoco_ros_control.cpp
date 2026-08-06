@@ -17,7 +17,25 @@ namespace mujoco_ros_control
   {
     std::string xml_path;
     nhp_.getParam("mujoco_model_path", xml_path);
-    nhp_.getParam("headless", headless_);
+    nhp_.param("headless", headless_, false);
+    nhp_.param("render_fps", render_fps_, 30.0);
+    nhp_.param("vsync", vsync_, false);
+    nhp_.param("render_shadows", render_shadows_, false);
+    nhp_.param("render_reflections", render_reflections_, false);
+    nhp_.param("window_width", window_width_, 960);
+    nhp_.param("window_height", window_height_, 720);
+
+    if(render_fps_ <= 0.0)
+      {
+        ROS_WARN("render_fps must be positive; use 30 Hz");
+        render_fps_ = 30.0;
+      }
+    if(window_width_ <= 0 || window_height_ <= 0)
+      {
+        ROS_WARN("MuJoCo window dimensions must be positive; use 960x720");
+        window_width_ = 960;
+        window_height_ = 720;
+      }
 
     if(!nhp_.getParam("mujoco_model_path", xml_path))
       {
@@ -164,7 +182,7 @@ int main(int argc, char** argv)
   ros::NodeHandle nhp("~");
   mujoco_ros_control::MujocoRosControl mujoco_ros_control(nh, nhp);
 
-  mujoco_ros_control.init();
+  if(!mujoco_ros_control.init()) return 1;
 
   bool headless = mujoco_ros_control.headless_;
 
@@ -174,17 +192,42 @@ int main(int argc, char** argv)
 
   if(!headless)
     {
-      // init GLFW, create window, make OpenGL context current, request v-sync
-      glfwInit();
-      window = glfwCreateWindow(1200, 900, "Demo", NULL, NULL);
+      // Rendering runs on the simulation thread. Under WSLg, reducing render
+      // frequency and disabling v-sync prevents buffer presentation from
+      // stalling physics and controller updates.
+      if(!glfwInit())
+        {
+          ROS_ERROR("Failed to initialize GLFW");
+          return 1;
+        }
+      window = glfwCreateWindow(mujoco_ros_control.window_width_,
+                                mujoco_ros_control.window_height_,
+                                "MuJoCo ROS Control", NULL, NULL);
+      if(!window)
+        {
+          ROS_ERROR("Failed to create MuJoCo GLFW window");
+          glfwTerminate();
+          return 1;
+        }
       glfwMakeContextCurrent(window);
-      glfwSwapInterval(1);
+      glfwSwapInterval(mujoco_ros_control.vsync_ ? 1 : 0);
+
+      ROS_INFO("MuJoCo viewer: %.1f renders/sim-second, vsync=%s, shadows=%s, reflections=%s, window=%dx%d",
+               mujoco_ros_control.render_fps_,
+               mujoco_ros_control.vsync_ ? "on" : "off",
+               mujoco_ros_control.render_shadows_ ? "on" : "off",
+               mujoco_ros_control.render_reflections_ ? "on" : "off",
+               mujoco_ros_control.window_width_,
+               mujoco_ros_control.window_height_);
 
       // make context current
       glfwMakeContextCurrent(window);
 
       // initialize mujoco visualization functions
-      mujoco_visualization_utils.init(mujoco_ros_control.mujoco_model_, mujoco_ros_control.mujoco_data_, window);
+      mujoco_visualization_utils.init(mujoco_ros_control.mujoco_model_,
+                                      mujoco_ros_control.mujoco_data_, window,
+                                      mujoco_ros_control.render_shadows_,
+                                      mujoco_ros_control.render_reflections_);
     }
 
   ros::AsyncSpinner spinner(1);
@@ -201,7 +244,8 @@ int main(int argc, char** argv)
       if (!paused)
         {
           mjtNum sim_start = mujoco_ros_control.mujoco_data_->time;
-          while(mujoco_ros_control.mujoco_data_->time - sim_start < 1.0 / 60.0 && ros::ok())
+          while(mujoco_ros_control.mujoco_data_->time - sim_start <
+                1.0 / mujoco_ros_control.render_fps_ && ros::ok())
             {
               mujoco_ros_control.update();
             }

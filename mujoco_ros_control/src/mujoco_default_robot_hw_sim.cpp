@@ -1,5 +1,7 @@
 #include <mujoco_ros_control/mujoco_default_robot_hw_sim.h>
 
+#include <cmath>
+
 namespace mujoco_ros_control
 {
 
@@ -20,6 +22,16 @@ namespace mujoco_ros_control
   {
     if(name_prefix_.empty() || name.find(name_prefix_) == 0) return name;
     return name_prefix_ + name;
+  }
+
+  bool DefaultRobotHWSim::isIgnoredJoint(const std::string& name) const
+  {
+    const std::string unqualified_name = stripNamePrefix(name);
+    for(const std::string& prefix : ignored_joint_prefixes_)
+      {
+        if(unqualified_name.find(prefix) == 0) return true;
+      }
+    return false;
   }
 
   void DefaultRobotHWSim::registerManagedActuator(int actuator_id)
@@ -64,6 +76,8 @@ namespace mujoco_ros_control
 
     model_nh.param("use_ros_control", use_ros_control_, false);
     model_nh.param("allow_direct_state_set", allow_direct_state_set_, true);
+    ignored_joint_prefixes_.clear();
+    model_nh.getParam("simulation/ignored_mujoco_joint_prefixes", ignored_joint_prefixes_);
 
     mujoco_model_ = mujoco_model;
     mujoco_data_ = mujoco_data;
@@ -83,6 +97,7 @@ namespace mujoco_ros_control
           {
             const char* joint_name = mj_id2name(mujoco_model_, mjtObj_::mjOBJ_JOINT, i);
             if(!joint_name || !matchesRobotNamespace(joint_name)) continue;
+            if(isIgnoredJoint(joint_name)) continue;
             joint_list_.push_back(joint_name);
 
             for(int j = 0; j < mujoco_model_->nu; j++) {
@@ -110,7 +125,7 @@ namespace mujoco_ros_control
         if (mujoco_model_->jnt_type[j] > 1)
           {
             const char* jname = mj_id2name(mujoco_model_, mjOBJ_JOINT, j);
-            if (jname && matchesRobotNamespace(jname))
+            if (jname && matchesRobotNamespace(jname) && !isIgnoredJoint(jname))
               {
                 model_joint_names_.push_back(std::string(jname));
                 ros_joint_names_.push_back(stripNamePrefix(jname));
@@ -236,11 +251,27 @@ void DefaultRobotHWSim::write(const ros::Time& time, const ros::Duration& period
   // 3) ctrl limit を適用
   for (int i = 0; i < mujoco_model_->nu; ++i)
     {
+      if(!std::isfinite(mujoco_data_->ctrl[i]))
+        {
+          ROS_WARN_THROTTLE(1.0, "mujoco: replace non-finite actuator %d command with zero", i);
+          mujoco_data_->ctrl[i] = 0.0;
+        }
+
       if (mujoco_model_->actuator_ctrllimited[i])
         {
           double lo = mujoco_model_->actuator_ctrlrange[2*i+0];
           double hi = mujoco_model_->actuator_ctrlrange[2*i+1];
           mujoco_data_->ctrl[i] = clip(mujoco_data_->ctrl[i], lo, hi);
+        }
+      else if(mujoco_model_->actuator_trntype[i] == mjTRN_JOINT)
+        {
+          const int joint_id = mujoco_model_->actuator_trnid[2 * i];
+          if(joint_id >= 0 && mujoco_model_->jnt_limited[joint_id])
+            {
+              const double lo = mujoco_model_->jnt_range[2 * joint_id + 0];
+              const double hi = mujoco_model_->jnt_range[2 * joint_id + 1];
+              mujoco_data_->ctrl[i] = clip(mujoco_data_->ctrl[i], lo, hi);
+            }
         }
     }
 
@@ -263,6 +294,16 @@ void DefaultRobotHWSim::write(const ros::Time& time, const ros::Duration& period
             qpos[qposadr + 4] = direct_root_pose_.orientation.x;
             qpos[qposadr + 5] = direct_root_pose_.orientation.y;
             qpos[qposadr + 6] = direct_root_pose_.orientation.z;
+            // A pose teleport must not retain the free body's pre-teleport
+            // linear/angular velocity.  Keeping it makes slow scripted pose
+            // sweeps accumulate falling and collision velocity between
+            // updates, producing an impulse unrelated to the commanded path.
+            {
+              mjtNum* qvel = mujoco_data_->qvel;
+              const int dofadr = mujoco_model_->jnt_dofadr[root_joint_id_];
+              for (int dof = 0; dof < 6; ++dof)
+                qvel[dofadr + dof] = 0.0;
+            }
             teleported = true;
             break;
           case mjJNT_BALL:
@@ -314,6 +355,7 @@ void DefaultRobotHWSim::write(const ros::Time& time, const ros::Duration& period
     if(msg.name.size() != msg.position.size())
       {
         ROS_WARN("mujoco: size of actuator names and size of input is not same.");
+        return;
       }
     for(int i = 0; i < msg.name.size(); i++)
       {
@@ -325,7 +367,14 @@ void DefaultRobotHWSim::write(const ros::Time& time, const ros::Duration& period
           }
         else
           {
-            control_input_.at(actuator_id) = msg.position.at(i);
+            const double command = msg.position.at(i);
+            if(!std::isfinite(command))
+              {
+                ROS_WARN_THROTTLE(1.0, "mujoco: reject non-finite command for actuator %s",
+                                  actuator_name.c_str());
+                continue;
+              }
+            control_input_.at(actuator_id) = command;
           }
       }
   }
