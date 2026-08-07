@@ -591,6 +591,18 @@ def process_xml(urdf_path, mujoco_path, model_config=None):
                 if mesh_ref in all_material_meshes:
                     geom.set("material", "mat_" + mesh_ref)
 
+    # A rotor URDF normally has a positive minimum controllable thrust, but
+    # zero is also a distinct and valid command while the motors are stopped.
+    # MuJoCo's ctrlrange clips zero to that positive lower limit, otherwise,
+    # causing an unarmed vehicle to produce thrust on the ground.  Models that
+    # need the stopped state can explicitly extend only the MuJoCo range to 0.
+    rotor_ctrlrange = thrusts
+    if model_config is not None and model_config.get("allow_zero_rotor_force", False):
+        thrust_range = thrusts.split()
+        if len(thrust_range) != 2:
+            raise ValueError("rotor thrust range must contain lower and upper values")
+        rotor_ctrlrange = format_numbers([0.0, float(thrust_range[1])])
+
     # actuators
     global rotor_list
     global joint_list
@@ -600,7 +612,7 @@ def process_xml(urdf_path, mujoco_path, model_config=None):
         rotor_elem = ET.Element("motor")
         rotor_elem.set("name", rotor)
         rotor_elem.set("ctrllimited", "true")
-        rotor_elem.set("ctrlrange", thrusts)
+        rotor_elem.set("ctrlrange", rotor_ctrlrange)
         rotor_elem.set("gear", "0 0 1 0 0 " + str(float(m_f_rate) * float(rotor_axis_dict[rotor])))
         rotor_elem.set("site", rotor)
         actuator_elem.append(rotor_elem)
