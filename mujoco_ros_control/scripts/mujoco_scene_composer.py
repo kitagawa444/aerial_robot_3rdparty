@@ -290,6 +290,17 @@ def compose_scene(config_path):
         option_root = get_or_create(scene_root, "option")
         option_root.set("jacobian", str(config["jacobian"]))
 
+    # Allow a composed scene to tune global MuJoCo solver/contact options
+    # without modifying the generated single-robot model.  Existing scene
+    # YAML files omit this mapping and retain the previous defaults.
+    option_config = config.get("option", {})
+    if not isinstance(option_config, dict):
+        raise ValueError("scene option must be a mapping")
+    if option_config:
+        option_root = get_or_create(scene_root, "option")
+        for attribute, value in option_config.items():
+            option_root.set(str(attribute), str(value))
+
     asset_root = get_or_create(scene_root, "asset")
     worldbody_root = get_or_create(scene_root, "worldbody")
     actuator_root = get_or_create(scene_root, "actuator")
